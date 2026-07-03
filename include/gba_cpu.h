@@ -31,6 +31,7 @@ typedef enum {
 typedef struct {
     uint32_t r[16];                    // active register view (R0-R15)
     uint32_t r8_12_fiq[5];             // banked FIQ-only regs (R8-R12)
+    uint32_t r8_12_shared[5];          // banked User/System (non-FIQ) regs (R8-R12)
     uint32_t r13_14_banked[GBA_BANK_COUNT][2]; // banked SP(0)/LR(1) per mode
     uint32_t cpsr;                     // current program status register
     uint32_t spsr[GBA_BANK_COUNT];     // saved CPSR per privileged mode
@@ -38,11 +39,13 @@ typedef struct {
     GbaCpuMode current_mode;           // cached mode bits, mirrors cpsr bits 0-4
 } GbaCpuState;
 
-// TODO: gba_cpu_init(GbaCpuState* cpu)
-// TODO: gba_cpu_reset(GbaCpuState* cpu)
-// TODO: gba_cpu_step(GbaCpuState* cpu, GbaMemory* mem)   single instruction step (ARM or Thumb dispatch)
-// TODO: gba_cpu_switch_mode(GbaCpuState* cpu, GbaCpuMode new_mode) handles register banking on mode change
-// TODO: gba_cpu_enter_exception(GbaCpuState* cpu, ...)   IRQ/SWI/etc entry sequence
+struct GbaMemory; // fwd decl, defined in gba_memory.h
+
+void gba_cpu_init(GbaCpuState* cpu);
+void gba_cpu_reset(GbaCpuState* cpu);
+void gba_cpu_switch_mode(GbaCpuState* cpu, GbaCpuMode new_mode);
+void gba_cpu_enter_exception(GbaCpuState* cpu, GbaCpuMode exception_mode, uint32_t vector_addr);
+void gba_cpu_step(GbaCpuState* cpu, struct GbaMemory* mem);
 
 #ifdef __cplusplus
 }
