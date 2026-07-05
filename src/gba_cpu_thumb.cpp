@@ -14,5 +14,18 @@
 //  - Same dispatch strategy question as ARM (table vs switch) -- keep
 //    consistent with whatever we land on there.
 
-// TODO: uint16_t gba_cpu_fetch_thumb(GbaCpuState* cpu, GbaMemory* mem)
-// TODO: void gba_cpu_step_thumb(GbaCpuState* cpu, GbaMemory* mem)
+uint16_t gba_cpu_fetch_thumb(GbaCpuState* cpu, GbaMemory* mem) {
+    return gba_memory_read16(mem, cpu->r[15]);
+}
+
+void gba_cpu_step_thumb(GbaCpuState* cpu, GbaMemory* mem) {
+    uint16_t opcode = gba_cpu_fetch_thumb(cpu, mem);
+    cpu->r[15] += 2;
+
+    // TODO: decode into the 19 Thumb format groups
+    switch ((opcode >> 13) & 0x7) {
+        default:
+            // stub - unimplemented group
+            break;
+    }
+}

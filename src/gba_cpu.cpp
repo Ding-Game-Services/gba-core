@@ -1,6 +1,10 @@
 #include "gba_cpu.h"
 #include "gba_memory.h"
 
+// Defined in gba_cpu_arm.cpp / gba_cpu_thumb.cpp
+void gba_cpu_step_arm(GbaCpuState* cpu, GbaMemory* mem);
+void gba_cpu_step_thumb(GbaCpuState* cpu, GbaMemory* mem);
+
 // Core CPU lifecycle + the mode-switch/exception plumbing that ties
 // gba_cpu_arm.cpp and gba_cpu_thumb.cpp together.
 //
@@ -142,5 +146,13 @@ void gba_cpu_enter_exception(GbaCpuState* cpu, GbaCpuMode exception_mode, uint32
 
     cpu->r[15] = vector_addr;
 
-    (void)was_thumb; // not yet used -- will matter once fetch/decode tracks Thumb return offsets
+(void)was_thumb; // not yet used -- will matter once fetch/decode tracks Thumb return offsets
+}
+
+void gba_cpu_step(GbaCpuState* cpu, GbaMemory* mem) {
+    if (cpu->thumb_mode) {
+        gba_cpu_step_thumb(cpu, mem);
+    } else {
+        gba_cpu_step_arm(cpu, mem);
+    }
 }

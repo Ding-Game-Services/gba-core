@@ -46,6 +46,7 @@ void gba_cpu_reset(GbaCpuState* cpu);
 void gba_cpu_switch_mode(GbaCpuState* cpu, GbaCpuMode new_mode);
 void gba_cpu_enter_exception(GbaCpuState* cpu, GbaCpuMode exception_mode, uint32_t vector_addr);
 void gba_cpu_step(GbaCpuState* cpu, struct GbaMemory* mem);
+bool gba_cpu_check_condition(uint32_t cpsr, uint32_t cond_bits);
 
 #ifdef __cplusplus
 }
