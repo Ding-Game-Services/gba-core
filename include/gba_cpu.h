@@ -39,6 +39,12 @@ typedef struct {
     GbaCpuMode current_mode;           // cached mode bits, mirrors cpsr bits 0-4
 } GbaCpuState;
 
+// CPSR condition flag bit positions -- shared across ARM and Thumb interpreters
+static const uint32_t FLAG_N = 1u << 31;
+static const uint32_t FLAG_Z = 1u << 30;
+static const uint32_t FLAG_C = 1u << 29;
+static const uint32_t FLAG_V = 1u << 28;
+
 struct GbaMemory; // fwd decl, defined in gba_memory.h
 
 void gba_cpu_init(GbaCpuState* cpu);

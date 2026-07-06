@@ -245,13 +245,181 @@ void gba_cpu_step_arm(GbaCpuState* cpu, GbaMemory* mem) {
                     // check here once we hit real-ROM cases that need it.
                     gba_cpu_switch_mode(cpu, new_mode);
 
-                    uint32_t itf_mask = mask & 0xE0; // bits 5-7 (T, F, I) within the control byte
+uint32_t itf_mask = mask & 0xE0; // bits 5-7 (T, F, I) within the control byte
                     cpu->cpsr = (cpu->cpsr & ~itf_mask) | (value & itf_mask);
+                    cpu->thumb_mode = (cpu->cpsr & 0x20) != 0; // keep cached flag in sync
                 }
                 if (write_flags) {
                     cpu->cpsr = (cpu->cpsr & ~0xFF000000) | (value & 0xFF000000);
                 }
             }
+        }
+        return;
+    }
+
+// Branch and Exchange group: bits [27:4] == 0001 0010 1111 1111 1111 0001
+    if (((opcode >> 4) & 0xFFFFFF) == 0x12FFF1) {
+        uint32_t rm = opcode & 0xF;
+        uint32_t target = cpu->r[rm];
+
+bool switch_to_thumb = target & 0x1;
+        cpu->thumb_mode = switch_to_thumb;
+        cpu->cpsr = switch_to_thumb ? (cpu->cpsr | 0x20) : (cpu->cpsr & ~0x20u);
+
+        cpu->r[15] = target & ~0x1; // clear bit 0, it's not part of the address
+        return;
+    }
+
+// Software Interrupt group: bits [27:24] == 1111
+    if (((opcode >> 24) & 0xF) == 0xF) {
+        // TODO: comment number (opcode & 0xFFFFFF) not used by hardware --
+        // BIOS reads it from the instruction itself if needed. Not decoded here.
+        gba_cpu_enter_exception(cpu, GBA_MODE_SUPERVISOR, 0x08);
+        return;
+    }
+
+// Branch / Branch-Link group: bits [27:25] == 101
+    if (((opcode >> 25) & 0x7) == 0x5) {
+        bool link = (opcode >> 24) & 0x1; // L bit
+
+        // 24-bit signed offset, shifted left 2 (word-aligned), sign-extended.
+        int32_t offset = opcode & 0xFFFFFF;
+        if (offset & 0x800000) {
+            offset |= 0xFF000000; // sign-extend
+        }
+        offset <<= 2;
+
+        if (link) {
+            // LR gets the return address: PC has already been advanced
+            // +4 past this instruction at the top of gba_cpu_step_arm,
+            // so r[15] currently holds (instruction_addr + 4), which is
+            // exactly the correct return address.
+            cpu->r[14] = cpu->r[15];
+        }
+
+        // Branch target is relative to PC+8 (the ARM pipeline's read-side
+        // offset), not PC+4. r[15] here is only +4 past the instruction,
+        // so add another +4 to match the +8 rule used for PC-relative math.
+        cpu->r[15] = cpu->r[15] + 4 + offset;
+        return;
+    }
+
+// Block Data Transfer group: bits [27:25] == 100 (LDM/STM)
+    if (((opcode >> 25) & 0x7) == 0x4) {
+        bool pre_index   = (opcode >> 24) & 0x1; // P bit
+        bool add_offset  = (opcode >> 23) & 0x1; // U bit
+        bool psr_or_user = (opcode >> 22) & 0x1; // S bit
+        bool writeback   = (opcode >> 21) & 0x1; // W bit
+        bool is_load     = (opcode >> 20) & 0x1; // L bit
+        uint32_t rn      = (opcode >> 16) & 0xF;
+        uint16_t reg_list = opcode & 0xFFFF;
+
+uint32_t base = cpu->r[rn];
+        int num_regs = 0;
+        for (int i = 0; i < 16; i++) {
+            if (reg_list & (1 << i)) num_regs++;
+        }
+
+        // Address stepping: each register transfer uses one word (4 bytes).
+        // Direction (U bit) determines whether we walk up or down from base;
+        // P bit determines pre- vs post-increment at each step.
+        uint32_t addr = add_offset ? base : (base - num_regs * 4);
+        if (!add_offset) {
+            // Walking downward: lowest register in the list goes to the
+            // lowest address, so we start at (base - total size) and walk
+            // up from there. This matches ARM's documented behavior for
+            // decrement addressing modes (equivalent to DA/DB in practice).
+        }
+
+        uint32_t final_base = add_offset ? (base + num_regs * 4) : (base - num_regs * 4);
+
+        // TODO: PSR/user-bank register transfers (S bit) not yet handled --
+        // affects LDM with PC in list (restores CPSR from SPSR) and
+        // accessing user-mode registers from privileged modes.
+        (void)psr_or_user;
+
+for (int i = 0; i < 16; i++) {
+            if (!(reg_list & (1 << i))) continue;
+
+            if (pre_index) addr += 4;
+
+            if (is_load) {
+                cpu->r[i] = gba_mem_read32(mem, addr);
+                // TODO: if i == 15 (PC), this is a branch -- pipeline
+                // refill not yet handled here.
+            } else {
+                gba_mem_write32(mem, addr, cpu->r[i]);
+                // TODO: storing PC (i==15) reads as PC+12 on some ARM
+                // cores -- not yet handled here.
+            }
+
+            if (!pre_index) addr += 4;
+        }
+
+        if (writeback) {
+            cpu->r[rn] = final_base;
+        }
+        return;
+    }
+
+// Single Data Transfer group: bits [27:26] == 01 (LDR/STR)
+    if (((opcode >> 26) & 0x3) == 0x1) {
+        bool immediate_offset = !((opcode >> 25) & 0x1); // I bit: 0=imm, 1=register
+        bool pre_index        = (opcode >> 24) & 0x1;    // P bit
+        bool add_offset       = (opcode >> 23) & 0x1;    // U bit: 1=add, 0=subtract
+        bool byte_transfer    = (opcode >> 22) & 0x1;    // B bit
+        bool writeback        = (opcode >> 21) & 0x1;    // W bit
+        bool is_load          = (opcode >> 20) & 0x1;    // L bit
+        uint32_t rn           = (opcode >> 16) & 0xF;
+        uint32_t rd           = (opcode >> 12) & 0xF;
+
+        uint32_t offset;
+        if (immediate_offset) {
+            offset = opcode & 0xFFF; // 12-bit immediate
+        } else {
+            // Register offset, optionally shifted -- reuse the same
+            // immediate-shift decode as Data Processing (bit 4 must be 0
+            // here per spec; register-shift-by-register is not valid in
+            // this addressing mode).
+            offset = gba_cpu_decode_operand2_reg_imm(cpu, opcode).value;
+        }
+
+uint32_t base = cpu->r[rn];
+        uint32_t offset_addr = add_offset ? (base + offset) : (base - offset);
+
+        // Pre-indexed: use offset_addr as the transfer address, and if W
+        // is set, write it back to Rn. Post-indexed: use base as the
+        // transfer address, and ALWAYS write offset_addr back to Rn
+        // regardless of W (W means something different in post-index --
+        // it selects privileged/user-mode memory translation, which we're
+        // not modeling -- so writeback always happens in post-index).
+        uint32_t transfer_addr = pre_index ? offset_addr : base;
+if (is_load) {
+            if (byte_transfer) {
+                cpu->r[rd] = gba_mem_read8(mem, transfer_addr);
+            } else {
+                // TODO: unaligned word loads should rotate the read value
+                // per ARM's LDR rotation quirk -- not yet handled.
+                cpu->r[rd] = gba_mem_read32(mem, transfer_addr);
+            }
+            // TODO: if rd == 15 (PC), this is a branch -- pipeline refill
+            // not yet handled here.
+} else {
+            if (byte_transfer) {
+                gba_mem_write8(mem, transfer_addr, (uint8_t)(cpu->r[rd] & 0xFF));
+            } else {
+                gba_mem_write32(mem, transfer_addr, cpu->r[rd]);
+            }
+            // TODO: storing PC (rd==15) reads as PC+12 on some ARM cores --
+            // not yet handled here.
+        }
+
+        if (pre_index) {
+            if (writeback) {
+                cpu->r[rn] = offset_addr;
+            }
+        } else {
+            cpu->r[rn] = offset_addr; // post-index always writes back
         }
         return;
     }
