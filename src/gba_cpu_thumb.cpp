@@ -315,8 +315,56 @@ if (write_back) {
                 break;
             }
 
-            // TODO: Formats 5-8 (Hi register ops/BX, PC-relative load,
-            // load/store with register offset, sign-extend load/store)
+            if (sub == 0x1) {
+                // Format 5: Hi Register Operations / BX
+                uint16_t op = (opcode >> 8) & 0x3;
+                bool h1 = (opcode >> 7) & 0x1;
+                bool h2 = (opcode >> 6) & 0x1;
+                uint32_t rs = ((opcode >> 3) & 0x7) | (h2 ? 0x8 : 0x0);
+                uint32_t rd = (opcode & 0x7) | (h1 ? 0x8 : 0x0);
+
+                uint32_t operand1 = cpu->r[rd];
+                uint32_t operand2 = cpu->r[rs];
+                // TODO: if rs or rd is R15, real hardware reads it as
+                // (current instr addr + 4) due to pipelining -- cpu->r[15]
+                // here already reflects the post-fetch +2, not +4. Same
+                // class of quirk as the ARM PC-as-operand TODOs; revisit
+                // once the pipeline/prefetch model is in place.
+
+                switch (op) {
+                    case 0x0: // ADD -- no flags set
+                        cpu->r[rd] = operand1 + operand2;
+                        break;
+                    case 0x1: { // CMP -- flags only, full N/Z/C/V like ARM CMP
+                        uint32_t result = operand1 - operand2;
+                        bool carry = operand1 >= operand2; // no borrow
+                        bool overflow = ((operand1 ^ operand2) & (operand1 ^ result)) & 0x80000000;
+                        cpu->cpsr = (cpu->cpsr & ~(FLAG_N | FLAG_Z | FLAG_C | FLAG_V))
+                            | (result & 0x80000000 ? FLAG_N : 0)
+                            | (result == 0 ? FLAG_Z : 0)
+                            | (carry ? FLAG_C : 0)
+                            | (overflow ? FLAG_V : 0);
+                        break;
+                    }
+                    case 0x2: // MOV -- no flags set
+                        cpu->r[rd] = operand2;
+                        break;
+                    case 0x3: { // BX -- branch/exchange, h1 ignored per spec
+                        bool switch_to_arm = !(operand2 & 0x1);
+                        uint32_t target = operand2 & ~0x1u;
+                        cpu->thumb_mode = !switch_to_arm;
+                        cpu->r[15] = switch_to_arm ? (target & ~0x3u) : target;
+                        break;
+                    }
+                    default:
+                        break;
+                }
+                // Format 5 never sets flags except CMP (op == 0x1), handled above.
+                break;
+            }
+
+            // TODO: Formats 6-8 (PC-relative load, load/store with register
+            // offset, sign-extend load/store)
             break;
         }
         default:
