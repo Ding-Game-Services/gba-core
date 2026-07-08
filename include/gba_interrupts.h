@@ -30,18 +30,29 @@ typedef enum {
     GBA_IRQ_GAMEPAK  = 1 << 13
 } GbaIrqSource;
 
-// TODO: struct GbaInterruptState
-//   - uint16_t ie    (Interrupt Enable register mirror)
-//   - uint16_t if_   (Interrupt Flag/request register mirror, ack-on-write-1)
-//   - bool ime       (master enable)
+typedef struct {
+    uint16_t ie;    // Interrupt Enable register mirror
+    uint16_t if_;   // Interrupt Flag/request register mirror (write-1-to-ack)
+    bool ime;       // master enable
+} GbaInterruptState;
 
-// TODO: gba_interrupts_init(...)
-// TODO: gba_interrupts_request(GbaInterruptState* irq, GbaIrqSource source)
-//       called by PPU/timers/DMA/etc when a condition fires
-// TODO: gba_interrupts_check(GbaInterruptState* irq)  -> bool
-//       returns true if CPU should enter IRQ exception this step
-// TODO: gba_interrupts_ack(GbaInterruptState* irq, uint16_t value)
-//       handles write-1-to-acknowledge on IF register
+void gba_interrupts_init(GbaInterruptState* irq);
+
+// Called by PPU/timers/DMA/etc when a condition fires. ORs the source
+// bit into IF; does not check IE/IME (that's gba_interrupts_check's job).
+void gba_interrupts_request(GbaInterruptState* irq, GbaIrqSource source);
+
+// Returns true if the CPU should enter the IRQ exception this step.
+// NOTE: this checks IME and (IF & IE) only. The CPSR I-bit (CPU-side
+// IRQ disable) is a separate gate that lives on GbaCpuState, not here --
+// caller (gba_cpu_step) is expected to AND this result with !(cpsr & I-bit)
+// before calling gba_cpu_enter_exception. Flagging this in case you'd
+// rather this function take the CPU state and check both in one place.
+bool gba_interrupts_check(const GbaInterruptState* irq);
+
+// Handles write-1-to-acknowledge on the IF register: only the bits set
+// in `value` are cleared, everything else in if_ is left alone.
+void gba_interrupts_ack(GbaInterruptState* irq, uint16_t value);
 
 #ifdef __cplusplus
 }

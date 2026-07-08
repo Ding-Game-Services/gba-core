@@ -16,16 +16,34 @@ extern "C" {
 //    and for Timer 0/1 specifically, optionally drain an APU Direct Sound
 //    FIFO sample (see gba_apu.h / gba_dma.h Special timing).
 
-// TODO: struct GbaTimer
-//   - uint16_t counter, reload_value
-//   - uint16_t prescaler_select (0=1,1=64,2=256,3=1024)
-//   - bool cascade_enable, irq_enable, enabled
+typedef struct {
+    uint16_t counter;
+    uint16_t reload_value;
+    uint16_t prescaler_select; // 0=/1, 1=/64, 2=/256, 3=/1024
+    bool cascade_enable;
+    bool irq_enable;
+    bool enabled;
+    uint32_t cycle_accumulator; // cycles banked toward next prescaled tick
+} GbaTimer;
 
-// TODO: struct GbaTimerState { GbaTimer timers[4]; }
+typedef struct {
+    GbaTimer timers[4];
+} GbaTimerState;
 
-// TODO: gba_timers_init(...)
-// TODO: gba_timers_write_control(...)   handles TMxCNT_H register writes
-// TODO: gba_timers_step(GbaTimerState* t, uint32_t cycles)  advance all enabled timers, handle overflow/cascade/irq
+void gba_timers_init(GbaTimerState* t);
+
+// Handles TMxCNT_H writes (prescaler/cascade/irq/start-stop bits).
+void gba_timers_write_control(GbaTimerState* t, int index, uint16_t value);
+
+// Handles TMxCNT_L writes -- sets reload_value only (does not affect the
+// live counter until the next overflow-triggered reload, per GBATEK).
+// ADDED beyond the original TODO list since the file's own plan comment
+// calls for it; flag if you'd rather fold this into write_control instead.
+void gba_timers_set_reload(GbaTimerState* t, int index, uint16_t value);
+
+// Advances all enabled, non-cascade timers by `cycles`, handles overflow
+// (reload + optional IRQ + cascade notify to timer N+1).
+void gba_timers_step(GbaTimerState* t, uint32_t cycles);
 
 #ifdef __cplusplus
 }

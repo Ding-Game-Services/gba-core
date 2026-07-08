@@ -25,13 +25,14 @@ extern "C" {
 // BIOS bytes (see gba_memory.cpp note). Only matters once BIOS execution
 // itself works.
 
-// TODO: struct GbaBiosDescriptor
-//   - const uint8_t* data
-//   - size_t size          (should be exactly 16 KB for real GBA BIOS)
-//   - bool is_valid         (checksum/size validation result)
+typedef struct {
+    const uint8_t* data;   // caller-owned, not copied (matches GbaMemory::rom convention)
+    size_t size;           // should be exactly 16 KB (0x4000) for real GBA BIOS
+    bool is_valid;          // result of gba_bios_validate
+} GbaBiosDescriptor;
 
-// TODO: bool gba_bios_load(GbaBiosDescriptor* bios, const uint8_t* data, size_t size)
-// TODO: bool gba_bios_validate(const GbaBiosDescriptor* bios)
+bool gba_bios_load(GbaBiosDescriptor* bios, const uint8_t* data, size_t size);
+bool gba_bios_validate(const GbaBiosDescriptor* bios);
 
 #ifdef __cplusplus
 }

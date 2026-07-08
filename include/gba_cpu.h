@@ -45,14 +45,20 @@ static const uint32_t FLAG_Z = 1u << 30;
 static const uint32_t FLAG_C = 1u << 29;
 static const uint32_t FLAG_V = 1u << 28;
 
-struct GbaMemory; // fwd decl, defined in gba_memory.h
+struct GbaMemory;           // fwd decl, defined in gba_memory.h
+struct GbaInterruptState;   // fwd decl, defined in gba_interrupts.h
 
 void gba_cpu_init(GbaCpuState* cpu);
 void gba_cpu_reset(GbaCpuState* cpu);
 void gba_cpu_switch_mode(GbaCpuState* cpu, GbaCpuMode new_mode);
 void gba_cpu_enter_exception(GbaCpuState* cpu, GbaCpuMode exception_mode, uint32_t vector_addr);
-void gba_cpu_step(GbaCpuState* cpu, struct GbaMemory* mem);
+void gba_cpu_step(GbaCpuState* cpu, struct GbaMemory* mem, struct GbaInterruptState* irq);
 bool gba_cpu_check_condition(uint32_t cpsr, uint32_t cond_bits);
+
+// CPSR bit positions for the I (IRQ disable) and F (FIQ disable) control
+// bits -- separate from the FLAG_N/Z/C/V condition flags above.
+static const uint32_t CPSR_I_BIT = 1u << 7;
+static const uint32_t CPSR_F_BIT = 1u << 6;
 
 #ifdef __cplusplus
 }

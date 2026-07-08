@@ -19,15 +19,16 @@ extern "C" {
 // lifecycle, capability-based design) and owns/wires together every
 // subsystem stubbed so far.
 
-// TODO: struct GbaCoreState
-//   - GbaCpuState cpu
-//   - GbaMemory memory
-//   - GbaPpuState ppu
-//   - GbaApuState apu
-//   - GbaDmaState dma
-//   - GbaTimerState timers
-//   - GbaInterruptState interrupts
-//   - GbaBiosDescriptor bios
+typedef struct {
+    GbaCpuState cpu;
+    GbaMemory memory;
+    GbaPpuState ppu;
+    GbaApuState apu;
+    GbaDmaState dma;
+    GbaTimerState timers;
+    GbaInterruptState interrupts;
+    GbaBiosDescriptor bios;
+} GbaCoreState;
 
 // TODO: ding_core lifecycle functions (per ding_core.h contract):
 //   - gba_core_init(...)

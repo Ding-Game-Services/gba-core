@@ -1,5 +1,6 @@
 #include "gba_cpu.h"
 #include "gba_memory.h"
+#include "gba_interrupts.h"
 
 // Defined in gba_cpu_arm.cpp / gba_cpu_thumb.cpp
 void gba_cpu_step_arm(GbaCpuState* cpu, GbaMemory* mem);
@@ -149,7 +150,18 @@ void gba_cpu_enter_exception(GbaCpuState* cpu, GbaCpuMode exception_mode, uint32
 (void)was_thumb; // not yet used -- will matter once fetch/decode tracks Thumb return offsets
 }
 
-void gba_cpu_step(GbaCpuState* cpu, GbaMemory* mem) {
+void gba_cpu_step(GbaCpuState* cpu, GbaMemory* mem, GbaInterruptState* irq) {
+    // IRQ vector is the fixed exception vector at 0x18 (GBATEK).
+    static const uint32_t GBA_IRQ_VECTOR = 0x00000018;
+
+    if ((cpu->cpsr & CPSR_I_BIT) == 0 && gba_interrupts_check(irq)) {
+        gba_cpu_enter_exception(cpu, GBA_MODE_IRQ, GBA_IRQ_VECTOR);
+        // Falls through to execute the first instruction at the vector
+        // this same step rather than costing a step doing nothing --
+        // flag if you'd rather this return early and let the next
+        // gba_cpu_step call handle the first vector instruction instead.
+    }
+
     if (cpu->thumb_mode) {
         gba_cpu_step_thumb(cpu, mem);
     } else {

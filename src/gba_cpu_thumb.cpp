@@ -363,8 +363,324 @@ if (write_back) {
                 break;
             }
 
-            // TODO: Formats 6-8 (PC-relative load, load/store with register
-            // offset, sign-extend load/store)
+            if (sub == 0x2 || sub == 0x3) {
+                // Format 6: PC-relative load -- LDR Rd, [PC, #Imm]
+                // Encoding: 01001 [Rd:3][Word8:8]; sub only narrows this to
+                // 010/011 because Rd's top bit leaks into the sub field --
+                // Rd is re-extracted below from its real position (bits 10-8).
+                uint32_t rd = (opcode >> 8) & 0x7;
+                uint32_t word8 = opcode & 0xFF;
+
+                // Spec: PC here means (instruction address + 4), word-aligned
+                // (bit 1 forced to 0). cpu->r[15] was already advanced by 2
+                // at fetch time, so +2 more recovers the spec's "PC".
+                uint32_t base = (cpu->r[15] + 2) & ~0x3u;
+                uint32_t address = base + (word8 << 2);
+
+                cpu->r[rd] = gba_memory_read32(mem, address);
+                // Format 6 sets no flags.
+                break;
+            }
+
+if (sub == 0x4 || sub == 0x5 || sub == 0x6 || sub == 0x7) {
+                // Format 7: Load/store with register offset (bit9 == 0)
+                // Format 8: Sign-extended load/store (bit9 == 1)
+                // Encoding: 0101 [Op:2][bit9][0][Ro:3][Rb:3][Rd:3]
+                bool bit9 = (opcode >> 9) & 0x1;
+                bool bit11 = (opcode >> 11) & 0x1; // L or S depending on format
+                bool bit10 = (opcode >> 10) & 0x1; // B or H depending on format
+                uint32_t ro = (opcode >> 6) & 0x7;
+                uint32_t rb = (opcode >> 3) & 0x7;
+                uint32_t rd = opcode & 0x7;
+                uint32_t address = cpu->r[rb] + cpu->r[ro];
+
+                if (!bit9) {
+                    // Format 7: STR/STRB/LDR/LDRB, bit11=L, bit10=B
+                    bool load = bit11;
+                    bool byte = bit10;
+                    if (load) {
+                        cpu->r[rd] = byte ? gba_memory_read8(mem, address)
+                                           : gba_memory_read32(mem, address);
+                    } else {
+                        if (byte) {
+                            gba_memory_write8(mem, address, cpu->r[rd] & 0xFF);
+                        } else {
+                            gba_memory_write32(mem, address, cpu->r[rd]);
+                        }
+                    }
+                } else {
+                    // Format 8: STRH/LDRH/LDSB/LDSH, bit11=H, bit10=S
+                    bool sign = bit10;
+                    bool halfword = bit11;
+                    if (!sign) {
+                        if (halfword) {
+                            // LDRH
+                            cpu->r[rd] = gba_memory_read16(mem, address);
+                        } else {
+                            // STRH
+                            gba_memory_write16(mem, address, cpu->r[rd] & 0xFFFF);
+                        }
+                    } else {
+                        if (halfword) {
+                            // LDSH -- sign-extend 16-bit
+                            int16_t val = (int16_t)gba_memory_read16(mem, address);
+                            cpu->r[rd] = (uint32_t)(int32_t)val;
+                        } else {
+                            // LDSB -- sign-extend 8-bit
+                            int8_t val = (int8_t)gba_memory_read8(mem, address);
+                            cpu->r[rd] = (uint32_t)(int32_t)val;
+                        }
+                    }
+                }
+                // Formats 7 & 8 set no flags.
+                break;
+            }
+            break;
+        }
+case 0x3: {
+            // Format 9: Load/store with immediate offset
+            // Encoding: 011 [B][L][Offset5:5][Rb:3][Rd:3]
+            bool byte = (opcode >> 12) & 0x1;
+            bool load = (opcode >> 11) & 0x1;
+            uint32_t offset5 = (opcode >> 6) & 0x1F;
+            uint32_t rb = (opcode >> 3) & 0x7;
+            uint32_t rd = opcode & 0x7;
+
+            // Offset5 is a word count for word transfers, byte count for
+            // byte transfers -- spec scales it by 4 only when !byte.
+            uint32_t offset = byte ? offset5 : (offset5 << 2);
+            uint32_t address = cpu->r[rb] + offset;
+
+            if (load) {
+                cpu->r[rd] = byte ? gba_memory_read8(mem, address)
+                                   : gba_memory_read32(mem, address);
+            } else {
+                if (byte) {
+                    gba_memory_write8(mem, address, cpu->r[rd] & 0xFF);
+                } else {
+                    gba_memory_write32(mem, address, cpu->r[rd]);
+                }
+            }
+            // Format 9 sets no flags.
+            break;
+        }
+case 0x4: {
+            bool is_format11 = (opcode >> 12) & 0x1;
+
+            if (!is_format11) {
+                // Format 10: Load/store halfword
+                // Encoding: 1000 [L][Offset5:5][Rb:3][Rd:3]
+                bool load = (opcode >> 11) & 0x1;
+                uint32_t offset5 = (opcode >> 6) & 0x1F;
+                uint32_t rb = (opcode >> 3) & 0x7;
+                uint32_t rd = opcode & 0x7;
+                uint32_t address = cpu->r[rb] + (offset5 << 1); // scaled by 2
+
+                if (load) {
+                    cpu->r[rd] = gba_memory_read16(mem, address);
+                } else {
+                    gba_memory_write16(mem, address, cpu->r[rd] & 0xFFFF);
+                }
+            } else {
+                // Format 11: SP-relative load/store
+                // Encoding: 1001 [L][Rd:3][Word8:8]
+                bool load = (opcode >> 11) & 0x1;
+                uint32_t rd = (opcode >> 8) & 0x7;
+                uint32_t word8 = opcode & 0xFF;
+                uint32_t address = cpu->r[13] + (word8 << 2); // SP is r13
+
+                if (load) {
+                    cpu->r[rd] = gba_memory_read32(mem, address);
+                } else {
+                    gba_memory_write32(mem, address, cpu->r[rd]);
+                }
+            }
+            // Formats 10 & 11 set no flags.
+            break;
+        }
+case 0x5: {
+bool is_format13_or_14 = (opcode >> 12) & 0x1;
+            bool is_format14 = is_format13_or_14 && ((opcode >> 10) & 0x1);
+
+            if (!is_format13_or_14) {
+                // Format 12: Load address -- ADD Rd, (PC|SP), #Imm
+                // Encoding: 1010 [SP][Rd:3][Word8:8]
+                bool use_sp = (opcode >> 11) & 0x1;
+                uint32_t rd = (opcode >> 8) & 0x7;
+                uint32_t word8 = opcode & 0xFF;
+
+                uint32_t base;
+                if (use_sp) {
+                    base = cpu->r[13]; // SP
+                } else {
+                    // Spec: PC here means (instruction address + 4), word-aligned.
+                    // cpu->r[15] was already advanced by 2 at fetch time.
+                    base = (cpu->r[15] + 2) & ~0x3u;
+                }
+                cpu->r[rd] = base + (word8 << 2);
+                // Format 12 sets no flags.
+            } else {
+if (!is_format14) {
+                    // Format 13: Add offset to SP -- ADD SP, #+/-Imm
+                    // Encoding: 1011 0000 [S][SWord7:7]
+                    bool negative = (opcode >> 7) & 0x1;
+                    uint32_t sword7 = opcode & 0x7F;
+                    uint32_t offset = sword7 << 2;
+
+                    cpu->r[13] = negative ? (cpu->r[13] - offset) : (cpu->r[13] + offset);
+                    // Format 13 sets no flags.
+                } else {
+                    // Format 14: PUSH/POP registers
+                    // Encoding: 1011 [L]10[R][Rlist:8]
+                    bool pop = (opcode >> 11) & 0x1;
+                    bool include_lr_pc = (opcode >> 8) & 0x1; // R bit: LR on push, PC on pop
+                    uint32_t rlist = opcode & 0xFF;
+
+                    uint32_t count = include_lr_pc ? 1 : 0;
+                    for (int i = 0; i < 8; i++) {
+                        if (rlist & (1 << i)) count++;
+                    }
+
+                    if (pop) {
+                        uint32_t addr = cpu->r[13];
+                        for (int i = 0; i < 8; i++) {
+                            if (rlist & (1 << i)) {
+                                cpu->r[i] = gba_memory_read32(mem, addr);
+                                addr += 4;
+                            }
+                        }
+                        if (include_lr_pc) {
+                            cpu->r[15] = gba_memory_read32(mem, addr);
+                            addr += 4;
+                            // TODO: on ARMv5T, POP {PC} also acts like BX
+                            // (bit0 of the loaded value selects ARM/Thumb).
+                            // GBA's ARM7TDMI is ARMv4T, so POP {PC} always
+                            // stays in the current state -- confirm this
+                            // matches whatever mode-switch behavior the ARM
+                            // BX handler settled on before relying on it.
+                        }
+                        cpu->r[13] = addr;
+                    } else {
+                        uint32_t addr = cpu->r[13] - (count * 4);
+                        cpu->r[13] = addr;
+                        for (int i = 0; i < 8; i++) {
+                            if (rlist & (1 << i)) {
+                                gba_memory_write32(mem, addr, cpu->r[i]);
+                                addr += 4;
+                            }
+                        }
+                        if (include_lr_pc) {
+                            gba_memory_write32(mem, addr, cpu->r[14]);
+                        }
+                    }
+                    // Format 14 sets no flags.
+                }
+            }
+            break;
+        }
+case 0x6: {
+          bool is_branch_or_swi = (opcode >> 12) & 0x1;
+          if (!is_branch_or_swi) {
+            // Format 15: Multiple load/store -- STMIA/LDMIA Rb!, {Rlist}
+            // Encoding: 1100 [L][Rb:3][Rlist:8]
+            bool load = (opcode >> 11) & 0x1;
+            uint32_t rb = (opcode >> 8) & 0x7;
+            uint32_t rlist = opcode & 0xFF;
+
+            uint32_t addr = cpu->r[rb];
+            // TODO: empty Rlist is UNPREDICTABLE per spec -- not handled,
+            // assuming well-formed ROMs for now (same class as other
+            // deferred UNPREDICTABLE-case TODOs).
+            if (load) {
+                for (int i = 0; i < 8; i++) {
+                    if (rlist & (1 << i)) {
+                        cpu->r[i] = gba_memory_read32(mem, addr);
+                        addr += 4;
+                    }
+                }
+                // TODO: base register write-back when Rb is in Rlist for a
+                // load is UNPREDICTABLE per spec -- current code always
+                // writes back the final address regardless. Revisit if a
+                // test ROM exercises this.
+            } else {
+                for (int i = 0; i < 8; i++) {
+                    if (rlist & (1 << i)) {
+                        gba_memory_write32(mem, addr, cpu->r[i]);
+                        addr += 4;
+                    }
+                }
+            }
+cpu->r[rb] = addr;
+            // Format 15 sets no flags.
+          } else {
+            uint32_t cond = (opcode >> 8) & 0xF;
+
+            if (cond == 0xF) {
+// Format 17: SWI -- ARM's SWI decode is also still a TODO
+                // stub (see gba_cpu_arm.cpp, "remaining decode groups"
+                // comment), so nothing to hook into yet. Wire both up
+                // together when SWI/BIOS call dispatch gets built.
+            } else if (cond == 0xE) {
+                // Undefined instruction space per spec -- not handled.
+            } else {
+                // Format 16: Conditional branch
+                // Encoding: 1101 [Cond:4][SOffset8:8]
+                int8_t soffset8 = (int8_t)(opcode & 0xFF);
+                int32_t offset = ((int32_t)soffset8) << 1;
+
+                // ASSUMPTION: reusing the same condition-check helper the
+                // ARM conditional-execution path uses. Flag me if that
+                // function has a different name/signature than this.
+                if (gba_cpu_check_condition(cpu->cpsr, cond)) {
+                    // Spec: PC here means (instruction address + 4).
+                    // cpu->r[15] was already advanced by 2 at fetch time.
+                    uint32_t base = cpu->r[15] + 2;
+                    cpu->r[15] = base + offset;
+                }
+            }
+          }
+          break;
+        }
+case 0x7: {
+            bool is_long_branch_link = (opcode >> 12) & 0x1;
+
+            if (!is_long_branch_link) {
+                // Format 18: Unconditional branch
+                // Encoding: 11100 [Offset11:11]
+                uint32_t offset11 = opcode & 0x7FF;
+                // Sign-extend 11-bit field, then scale by 2.
+                int32_t signed_offset = (int32_t)(offset11 << 21) >> 21;
+                int32_t offset = signed_offset << 1;
+
+                // Spec: PC here means (instruction address + 4).
+                // cpu->r[15] was already advanced by 2 at fetch time.
+                uint32_t base = cpu->r[15] + 2;
+                cpu->r[15] = base + offset;
+                // Format 18 sets no flags.
+} else {
+                // Format 19: Long branch with link (two-instruction pair)
+                // Encoding: 11110 [OffsetHigh:11] then 11111 [OffsetLow:11]
+                bool second_half = (opcode >> 11) & 0x1;
+                uint32_t offset11 = opcode & 0x7FF;
+
+                if (!second_half) {
+                    // First instruction (H=0): stash a PC-relative target
+                    // into LR as scratch. Sign-extend the 11-bit high part
+                    // across the full 23 bits it represents before shifting.
+                    int32_t signed_high = (int32_t)(offset11 << 21) >> 21;
+                    uint32_t base = cpu->r[15] + 2; // spec PC = instr addr + 4
+                    cpu->r[14] = base + ((uint32_t)signed_high << 12);
+                } else {
+                    // Second instruction (H=1): combine with LR, set LR to
+                    // return address (instruction after this one) with bit0
+                    // set (Thumb return marker), then branch.
+                    uint32_t return_addr = cpu->r[15]; // already past this opcode
+                    uint32_t target = cpu->r[14] + (offset11 << 1);
+                    cpu->r[15] = target;
+                    cpu->r[14] = return_addr | 0x1;
+                }
+                // Format 19 sets no flags.
+            }
             break;
         }
         default:
