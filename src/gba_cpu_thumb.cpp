@@ -15,7 +15,7 @@
 //    consistent with whatever we land on there.
 
 uint16_t gba_cpu_fetch_thumb(GbaCpuState* cpu, GbaMemory* mem) {
-    return gba_memory_read16(mem, cpu->r[15]);
+    return gba_mem_read16(mem, cpu->r[15]);
 }
 
 void gba_cpu_step_thumb(GbaCpuState* cpu, GbaMemory* mem) {
@@ -377,7 +377,7 @@ if (write_back) {
                 uint32_t base = (cpu->r[15] + 2) & ~0x3u;
                 uint32_t address = base + (word8 << 2);
 
-                cpu->r[rd] = gba_memory_read32(mem, address);
+                cpu->r[rd] = gba_mem_read32(mem, address);
                 // Format 6 sets no flags.
                 break;
             }
@@ -399,13 +399,13 @@ if (sub == 0x4 || sub == 0x5 || sub == 0x6 || sub == 0x7) {
                     bool load = bit11;
                     bool byte = bit10;
                     if (load) {
-                        cpu->r[rd] = byte ? gba_memory_read8(mem, address)
-                                           : gba_memory_read32(mem, address);
+                        cpu->r[rd] = byte ? gba_mem_read8(mem, address)
+                                           : gba_mem_read32(mem, address);
                     } else {
                         if (byte) {
-                            gba_memory_write8(mem, address, cpu->r[rd] & 0xFF);
+                            gba_mem_write8(mem, address, cpu->r[rd] & 0xFF);
                         } else {
-                            gba_memory_write32(mem, address, cpu->r[rd]);
+                            gba_mem_write32(mem, address, cpu->r[rd]);
                         }
                     }
                 } else {
@@ -415,19 +415,19 @@ if (sub == 0x4 || sub == 0x5 || sub == 0x6 || sub == 0x7) {
                     if (!sign) {
                         if (halfword) {
                             // LDRH
-                            cpu->r[rd] = gba_memory_read16(mem, address);
+                            cpu->r[rd] = gba_mem_read16(mem, address);
                         } else {
                             // STRH
-                            gba_memory_write16(mem, address, cpu->r[rd] & 0xFFFF);
+                            gba_mem_write16(mem, address, cpu->r[rd] & 0xFFFF);
                         }
                     } else {
                         if (halfword) {
                             // LDSH -- sign-extend 16-bit
-                            int16_t val = (int16_t)gba_memory_read16(mem, address);
+                            int16_t val = (int16_t)gba_mem_read16(mem, address);
                             cpu->r[rd] = (uint32_t)(int32_t)val;
                         } else {
                             // LDSB -- sign-extend 8-bit
-                            int8_t val = (int8_t)gba_memory_read8(mem, address);
+                            int8_t val = (int8_t)gba_mem_read8(mem, address);
                             cpu->r[rd] = (uint32_t)(int32_t)val;
                         }
                     }
@@ -452,13 +452,13 @@ case 0x3: {
             uint32_t address = cpu->r[rb] + offset;
 
             if (load) {
-                cpu->r[rd] = byte ? gba_memory_read8(mem, address)
-                                   : gba_memory_read32(mem, address);
+                cpu->r[rd] = byte ? gba_mem_read8(mem, address)
+                                   : gba_mem_read32(mem, address);
             } else {
                 if (byte) {
-                    gba_memory_write8(mem, address, cpu->r[rd] & 0xFF);
+                    gba_mem_write8(mem, address, cpu->r[rd] & 0xFF);
                 } else {
-                    gba_memory_write32(mem, address, cpu->r[rd]);
+                    gba_mem_write32(mem, address, cpu->r[rd]);
                 }
             }
             // Format 9 sets no flags.
@@ -477,9 +477,9 @@ case 0x4: {
                 uint32_t address = cpu->r[rb] + (offset5 << 1); // scaled by 2
 
                 if (load) {
-                    cpu->r[rd] = gba_memory_read16(mem, address);
+                    cpu->r[rd] = gba_mem_read16(mem, address);
                 } else {
-                    gba_memory_write16(mem, address, cpu->r[rd] & 0xFFFF);
+                    gba_mem_write16(mem, address, cpu->r[rd] & 0xFFFF);
                 }
             } else {
                 // Format 11: SP-relative load/store
@@ -490,9 +490,9 @@ case 0x4: {
                 uint32_t address = cpu->r[13] + (word8 << 2); // SP is r13
 
                 if (load) {
-                    cpu->r[rd] = gba_memory_read32(mem, address);
+                    cpu->r[rd] = gba_mem_read32(mem, address);
                 } else {
-                    gba_memory_write32(mem, address, cpu->r[rd]);
+                    gba_mem_write32(mem, address, cpu->r[rd]);
                 }
             }
             // Formats 10 & 11 set no flags.
@@ -545,12 +545,12 @@ if (!is_format14) {
                         uint32_t addr = cpu->r[13];
                         for (int i = 0; i < 8; i++) {
                             if (rlist & (1 << i)) {
-                                cpu->r[i] = gba_memory_read32(mem, addr);
+                                cpu->r[i] = gba_mem_read32(mem, addr);
                                 addr += 4;
                             }
                         }
                         if (include_lr_pc) {
-                            cpu->r[15] = gba_memory_read32(mem, addr);
+                            cpu->r[15] = gba_mem_read32(mem, addr);
                             addr += 4;
                             // TODO: on ARMv5T, POP {PC} also acts like BX
                             // (bit0 of the loaded value selects ARM/Thumb).
@@ -565,12 +565,12 @@ if (!is_format14) {
                         cpu->r[13] = addr;
                         for (int i = 0; i < 8; i++) {
                             if (rlist & (1 << i)) {
-                                gba_memory_write32(mem, addr, cpu->r[i]);
+                                gba_mem_write32(mem, addr, cpu->r[i]);
                                 addr += 4;
                             }
                         }
                         if (include_lr_pc) {
-                            gba_memory_write32(mem, addr, cpu->r[14]);
+                            gba_mem_write32(mem, addr, cpu->r[14]);
                         }
                     }
                     // Format 14 sets no flags.
@@ -594,7 +594,7 @@ case 0x6: {
             if (load) {
                 for (int i = 0; i < 8; i++) {
                     if (rlist & (1 << i)) {
-                        cpu->r[i] = gba_memory_read32(mem, addr);
+                        cpu->r[i] = gba_mem_read32(mem, addr);
                         addr += 4;
                     }
                 }
@@ -605,7 +605,7 @@ case 0x6: {
             } else {
                 for (int i = 0; i < 8; i++) {
                     if (rlist & (1 << i)) {
-                        gba_memory_write32(mem, addr, cpu->r[i]);
+                        gba_mem_write32(mem, addr, cpu->r[i]);
                         addr += 4;
                     }
                 }
