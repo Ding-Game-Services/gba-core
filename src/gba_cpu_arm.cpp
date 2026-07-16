@@ -166,8 +166,13 @@ ShifterResult gba_cpu_decode_operand2_imm(GbaCpuState* cpu, uint32_t opcode) {
     return { result, carry_out };
 }
 
-void gba_cpu_step_arm(GbaCpuState* cpu, GbaMemory* mem) {
+// Cycle model: coarse S/N-cycle approximation, not wait-state-accurate.
+// Base cost is 1S (register-only instruction). Each additional memory
+// access adds 1N; writing PC (branch/pipeline refill) adds 2S. Good
+// enough to drive PPU/timer/DMA advancement for now -- see gba_cpu.h note.
+uint32_t gba_cpu_step_arm(GbaCpuState* cpu, GbaMemory* mem) {
     uint32_t opcode = gba_cpu_fetch_arm(cpu, mem);
+    uint32_t cycles = 1;
 
     // ARM PC always points 8 bytes ahead of the executing instruction
     // (2-stage pipeline). Advance by 4 here for the *next* fetch; the
@@ -177,7 +182,7 @@ void gba_cpu_step_arm(GbaCpuState* cpu, GbaMemory* mem) {
 
     uint32_t cond_bits = opcode >> 28;
     if (!gba_cpu_check_condition(cpu->cpsr, cond_bits)) {
-        return; // condition failed, instruction is a no-op
+        return cycles; // condition failed, instruction is a no-op, still costs 1S
     }
 
 // PSR Transfer group: bits [27:26] == 00, bits [24:23] == 10, bit 20 == 0
@@ -254,7 +259,7 @@ uint32_t itf_mask = mask & 0xE0; // bits 5-7 (T, F, I) within the control byte
                 }
             }
         }
-        return;
+        return cycles; // MRS/MSR: register-only, 1S
     }
 
 // Branch and Exchange group: bits [27:4] == 0001 0010 1111 1111 1111 0001
@@ -267,7 +272,7 @@ bool switch_to_thumb = target & 0x1;
         cpu->cpsr = switch_to_thumb ? (cpu->cpsr | 0x20) : (cpu->cpsr & ~0x20u);
 
         cpu->r[15] = target & ~0x1; // clear bit 0, it's not part of the address
-        return;
+        return cycles + 2; // BX writes PC: pipeline refill, +2S
     }
 
 // Software Interrupt group: bits [27:24] == 1111
@@ -275,7 +280,7 @@ bool switch_to_thumb = target & 0x1;
         // TODO: comment number (opcode & 0xFFFFFF) not used by hardware --
         // BIOS reads it from the instruction itself if needed. Not decoded here.
         gba_cpu_enter_exception(cpu, GBA_MODE_SUPERVISOR, 0x08);
-        return;
+        return cycles + 2; // SWI: exception entry writes PC, +2S
     }
 
 // Branch / Branch-Link group: bits [27:25] == 101
@@ -301,7 +306,7 @@ bool switch_to_thumb = target & 0x1;
         // offset), not PC+4. r[15] here is only +4 past the instruction,
         // so add another +4 to match the +8 rule used for PC-relative math.
         cpu->r[15] = cpu->r[15] + 4 + offset;
-        return;
+        return cycles + 2; // B/BL writes PC: pipeline refill, +2S
     }
 
 // Block Data Transfer group: bits [27:25] == 100 (LDM/STM)
@@ -359,7 +364,12 @@ for (int i = 0; i < 16; i++) {
         if (writeback) {
             cpu->r[rn] = final_base;
         }
-        return;
+
+        cycles += num_regs; // 1N per register transferred
+        if (is_load && (reg_list & (1 << 15))) {
+            cycles += 2; // LDM loading PC: pipeline refill
+        }
+        return cycles;
     }
 
 // Single Data Transfer group: bits [27:26] == 01 (LDR/STR)
@@ -421,7 +431,12 @@ if (is_load) {
         } else {
             cpu->r[rn] = offset_addr; // post-index always writes back
         }
-        return;
+
+        cycles += 1; // 1N for the single memory access
+        if (is_load && rd == 15) {
+            cycles += 2; // LDR loading PC: pipeline refill
+        }
+        return cycles;
     }
 
 // Multiply group: bits [27:22] == 000000, bit 7 == 1, bit 4 == 1
@@ -448,7 +463,12 @@ if (is_load) {
         // TODO: Rd must not be R15, Rm must not equal Rd on some ARM
 // TODO: Rd must not be R15, Rm must not equal Rd on some ARM
         // variants -- undefined behavior cases not yet validated.
-        return;
+
+        // Real hardware's multiply takes a variable number of internal
+        // cycles depending on Rs's value (early-termination logic) --
+        // approximating with a flat +2 for now (+3 if accumulating).
+        cycles += accumulate ? 3 : 2;
+        return cycles;
     }
 
 // Multiply Long group: bits [27:23] == 00001, bit 7 == 1, bit 4 == 1
@@ -485,7 +505,10 @@ if (is_load) {
         }
         // TODO: RdHi, RdLo, Rm must all be distinct and not R15 --
         // undefined behavior cases not yet validated.
-        return;
+
+        // Same approximation note as the 32-bit Multiply group above.
+        cycles += accumulate ? 4 : 3;
+        return cycles;
     }
 
 // Data Processing group: bits [27:26] == 00
@@ -728,12 +751,18 @@ case 0xE: { // BIC
             default:
                 break;
         }
-        return;
+
+        // TST/TEQ/CMP/CMN (0x8-0xB) never write rd, so no PC-refill case.
+        bool writes_rd = dp_opcode < 0x8 || dp_opcode > 0xB;
+        if (writes_rd && rd == 15) {
+            cycles += 2; // result written to PC: pipeline refill
+        }
+        return cycles;
     }
 
-    // TODO: remaining decode groups (Multiply, PSR Transfer, Single/Block
-    // Data Transfer, Branch, SWI) -- harness's unimplemented-opcode
-    // halt+dump hook goes here once wired.
+    // Unimplemented/reserved opcode -- no decode group matched above.
+    // TODO: harness's unimplemented-opcode halt+dump hook goes here.
+    return cycles;
 }
 
 // Evaluates the top-4-bit ARM condition code

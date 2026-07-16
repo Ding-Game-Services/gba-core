@@ -33,6 +33,13 @@ typedef struct {
     uint32_t r8_12_fiq[5];             // banked FIQ-only regs (R8-R12)
     uint32_t r8_12_shared[5];          // banked User/System (non-FIQ) regs (R8-R12)
     uint32_t r13_14_banked[GBA_BANK_COUNT][2]; // banked SP(0)/LR(1) per mode
+    uint32_t r13_14_user[2];           // ADDED: User/System's shared SP(0)/LR(1) --
+                                        // not covered by r13_14_banked since User
+                                        // and System aren't privileged modes but
+                                        // still need somewhere to live while a
+                                        // privileged mode is active. Flag if you'd
+                                        // rather fold this into the banked array
+                                        // with a 6th index instead.
     uint32_t cpsr;                     // current program status register
     uint32_t spsr[GBA_BANK_COUNT];     // saved CPSR per privileged mode
     bool thumb_mode;                   // cached T-bit, mirrors cpsr bit 5
@@ -52,8 +59,16 @@ void gba_cpu_init(GbaCpuState* cpu);
 void gba_cpu_reset(GbaCpuState* cpu);
 void gba_cpu_switch_mode(GbaCpuState* cpu, GbaCpuMode new_mode);
 void gba_cpu_enter_exception(GbaCpuState* cpu, GbaCpuMode exception_mode, uint32_t vector_addr);
-void gba_cpu_step(GbaCpuState* cpu, struct GbaMemory* mem, struct GbaInterruptState* irq);
+uint32_t gba_cpu_step(GbaCpuState* cpu, struct GbaMemory* mem, struct GbaInterruptState* irq);
 bool gba_cpu_check_condition(uint32_t cpsr, uint32_t cond_bits);
+
+// Per-mode interpreters, dispatched by gba_cpu_step based on thumb_mode.
+// Each returns the cycle count consumed by the single instruction it
+// executed (see gba_cpu_arm.cpp / gba_cpu_thumb.cpp top-of-file notes --
+// this is a simple S/N-cycle approximation, not full wait-state-accurate
+// timing; revisit once basics work and a game needs the real numbers).
+uint32_t gba_cpu_step_arm(GbaCpuState* cpu, struct GbaMemory* mem);
+uint32_t gba_cpu_step_thumb(GbaCpuState* cpu, struct GbaMemory* mem);
 
 // CPSR bit positions for the I (IRQ disable) and F (FIQ disable) control
 // bits -- separate from the FLAG_N/Z/C/V condition flags above.

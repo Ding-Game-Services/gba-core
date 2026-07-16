@@ -13,18 +13,13 @@
 //  - Cascade timers don't consume their own prescaler cycles -- they only
 //    advance on the preceding timer's overflow signal.
 
-// Forward decls -- defined in gba_interrupts.h / gba_apu.h. Not included
-// directly to avoid pulling those headers' full contents in here; caller
-// (gba_core.cpp) is expected to wire the real pointers through once the
-// core-level struct exists. For now these are declared extern "C" so the
-// linker resolves them once those files exist, matching the pattern
-// gba_cpu.cpp already uses for gba_cpu_step_arm/thumb.
-struct GbaInterruptState;
-struct GbaApuState;
+#include "gba_interrupts.h"
+#include "gba_apu.h"
 
-extern "C" {
-    void gba_interrupts_request_from_timer(struct GbaInterruptState* irq, int timer_index);
-    void gba_apu_timer_tick(struct GbaApuState* apu, int fifo_index);
+// Maps a timer index (0-3) to its GbaIrqSource bit. GBA_IRQ_TIMER0..3
+// are consecutive bits starting at position 3 in gba_interrupts.h.
+static GbaIrqSource gba_timers_irq_source(int index) {
+    return (GbaIrqSource)(GBA_IRQ_TIMER0 << index);
 }
 
 // Prescaler select (bits 0-1 of TMxCNT_H) -> clock divider, per GBATEK.
@@ -81,33 +76,20 @@ void gba_timers_set_reload(GbaTimerState* t, int index, uint16_t value) {
 
 // Handles one timer's overflow: reload, optional IRQ, optional cascade
 // notify to timer N+1, optional APU FIFO notify for timers 0/1.
-static void gba_timers_handle_overflow(GbaTimerState* t, int index) {
+static void gba_timers_handle_overflow(GbaTimerState* t, int index, GbaInterruptState* irq, GbaApuState* apu) {
     GbaTimer* timer = &t->timers[index];
     timer->counter = timer->reload_value;
 
-    if (timer->irq_enable) {
-        // IRQ source enum (GBA_IRQ_TIMER0..3) is bit-position-encoded
-        // starting at index 3 in gba_interrupts.h -- caller-side wiring
-        // (gba_interrupts_request_from_timer) owns translating timer
-        // index to the correct GbaIrqSource bit and calling
-        // gba_interrupts_request. Kept as an indirection here so this
-        // file doesn't need to include gba_interrupts.h directly.
-        gba_interrupts_request_from_timer(nullptr, index);
-        // NOTE: passing nullptr for now -- gba_core.cpp will need to
-        // replace this call with one that actually threads the real
-        // GbaInterruptState* through gba_timers_step once the core-level
-        // wiring exists. Flagging loudly since a nullptr deref here would
-        // be an easy thing to miss until IRQs are actually exercised.
+    if (timer->irq_enable && irq != nullptr) {
+        gba_interrupts_request(irq, gba_timers_irq_source(index));
     }
 
     // Timers 0 and 1 can drive Direct Sound sample playback -- notify
     // the APU unconditionally on overflow; gba_apu_timer_tick itself is
     // responsible for checking whether SOUNDCNT_H actually has this timer
     // selected for FIFO A/B before doing anything.
-    if (index == 0 || index == 1) {
-        gba_apu_timer_tick(nullptr, index);
-        // Same nullptr caveat as above -- real GbaApuState* needs to come
-        // from gba_core.cpp's wiring once that exists.
+    if ((index == 0 || index == 1) && apu != nullptr) {
+        gba_apu_timer_tick(apu, index);
     }
 
     // Cascade: notify the next timer up, if it exists and has cascade
@@ -120,13 +102,13 @@ static void gba_timers_handle_overflow(GbaTimerState* t, int index) {
                 // Cascaded timer itself overflowed -- recurse so a chain
                 // of cascades (e.g. Timer 2 cascading into Timer 3) all
                 // resolve within the same step call.
-                gba_timers_handle_overflow(t, index + 1);
+                gba_timers_handle_overflow(t, index + 1, irq, apu);
             }
         }
     }
 }
 
-void gba_timers_step(GbaTimerState* t, uint32_t cycles) {
+void gba_timers_step(GbaTimerState* t, uint32_t cycles, GbaInterruptState* irq, GbaApuState* apu) {
     for (int i = 0; i < 4; i++) {
         GbaTimer* timer = &t->timers[i];
 
@@ -144,7 +126,7 @@ void gba_timers_step(GbaTimerState* t, uint32_t cycles) {
             timer->cycle_accumulator -= divisor;
             timer->counter++;
             if (timer->counter == 0) { // wrapped past 0xFFFF
-                gba_timers_handle_overflow(t, i);
+                gba_timers_handle_overflow(t, i, irq, apu);
             }
         }
     }

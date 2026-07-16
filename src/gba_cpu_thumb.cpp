@@ -18,9 +18,13 @@ uint16_t gba_cpu_fetch_thumb(GbaCpuState* cpu, GbaMemory* mem) {
     return gba_mem_read16(mem, cpu->r[15]);
 }
 
-void gba_cpu_step_thumb(GbaCpuState* cpu, GbaMemory* mem) {
+// Same coarse S/N-cycle approximation as gba_cpu_step_arm (see that
+// file's top-of-function note) -- base 1S, +1N per extra memory access,
+// +2S when PC is written (branch/pipeline refill).
+uint32_t gba_cpu_step_thumb(GbaCpuState* cpu, GbaMemory* mem) {
     uint16_t opcode = gba_cpu_fetch_thumb(cpu, mem);
     cpu->r[15] += 2;
+    uint32_t cycles = 1;
 
 uint16_t top3 = (opcode >> 13) & 0x7;
 
@@ -289,6 +293,7 @@ case 0x8: // TST
                         // "leftover" value from internal multiply cycles --
                         // approximating as unaffected (carry stays whatever
                         // it already was) rather than modeling the quirk.
+                        cycles += 2; // approximation, same spirit as ARM MUL
                         break;
                     case 0xE: // BIC
                         result = operand1 & ~operand2;
@@ -360,6 +365,9 @@ if (write_back) {
                         break;
                 }
                 // Format 5 never sets flags except CMP (op == 0x1), handled above.
+                if (op == 0x3 || ((op == 0x0 || op == 0x2) && rd == 15)) {
+                    cycles += 2; // BX, or ADD/MOV writing PC: pipeline refill
+                }
                 break;
             }
 
@@ -379,6 +387,7 @@ if (write_back) {
 
                 cpu->r[rd] = gba_mem_read32(mem, address);
                 // Format 6 sets no flags.
+                cycles += 1;
                 break;
             }
 
@@ -433,6 +442,7 @@ if (sub == 0x4 || sub == 0x5 || sub == 0x6 || sub == 0x7) {
                     }
                 }
                 // Formats 7 & 8 set no flags.
+                cycles += 1;
                 break;
             }
             break;
@@ -462,6 +472,7 @@ case 0x3: {
                 }
             }
             // Format 9 sets no flags.
+            cycles += 1;
             break;
         }
 case 0x4: {
@@ -496,6 +507,7 @@ case 0x4: {
                 }
             }
             // Formats 10 & 11 set no flags.
+            cycles += 1;
             break;
         }
 case 0x5: {
@@ -574,6 +586,10 @@ if (!is_format14) {
                         }
                     }
                     // Format 14 sets no flags.
+                    cycles += count; // 1N per register transferred
+                    if (pop && include_lr_pc) {
+                        cycles += 2; // POP{PC}: pipeline refill
+                    }
                 }
             }
             break;
@@ -612,6 +628,13 @@ case 0x6: {
             }
 cpu->r[rb] = addr;
             // Format 15 sets no flags.
+            {
+                int count = 0;
+                for (int i = 0; i < 8; i++) {
+                    if (rlist & (1 << i)) count++;
+                }
+                cycles += count; // 1N per register transferred
+            }
           } else {
             uint32_t cond = (opcode >> 8) & 0xF;
 
@@ -636,6 +659,7 @@ cpu->r[rb] = addr;
                     // cpu->r[15] was already advanced by 2 at fetch time.
                     uint32_t base = cpu->r[15] + 2;
                     cpu->r[15] = base + offset;
+                    cycles += 2; // taken branch: pipeline refill
                 }
             }
           }
@@ -657,6 +681,7 @@ case 0x7: {
                 uint32_t base = cpu->r[15] + 2;
                 cpu->r[15] = base + offset;
                 // Format 18 sets no flags.
+                cycles += 2; // always taken: pipeline refill
 } else {
                 // Format 19: Long branch with link (two-instruction pair)
                 // Encoding: 11110 [OffsetHigh:11] then 11111 [OffsetLow:11]
@@ -678,6 +703,7 @@ case 0x7: {
                     uint32_t target = cpu->r[14] + (offset11 << 1);
                     cpu->r[15] = target;
                     cpu->r[14] = return_addr | 0x1;
+                    cycles += 2; // second half writes PC: pipeline refill
                 }
                 // Format 19 sets no flags.
             }
@@ -687,4 +713,6 @@ case 0x7: {
             // stub - unimplemented group
             break;
     }
+
+    return cycles;
 }
