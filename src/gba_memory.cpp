@@ -38,6 +38,9 @@ void gba_mem_init(GbaMemory* mem, const uint8_t* bios, const uint8_t* rom, uint3
     mem->save_type = GBA_SAVE_NONE;
 
     mem->bios_open_bus = 0;
+
+    mem->io_hook_context = nullptr;
+    mem->io_write_hook = nullptr;
 }
 
 // Returns a pointer to the backing byte for addr, masked into its region,
@@ -161,6 +164,13 @@ void gba_mem_write16(GbaMemory* mem, uint32_t addr, uint16_t val) {
     addr &= ~1u; // force halfword alignment (TODO: real misalign behavior)
     gba_mem_write8(mem, addr, (uint8_t)(val & 0xFF));
     gba_mem_write8(mem, addr + 1, (uint8_t)((val >> 8) & 0xFF));
+
+    // ADDED: dispatch to whichever subsystem owns this register. See
+    // gba_memory.h's io_write_hook note -- this file stays decoupled from
+    // dma/timers/ppu/apu, the core supplies the actual callback.
+    if (((addr >> 24) == 0x04) && mem->io_write_hook != nullptr) {
+        mem->io_write_hook(mem->io_hook_context, addr, val);
+    }
 }
 
 void gba_mem_write32(GbaMemory* mem, uint32_t addr, uint32_t val) {

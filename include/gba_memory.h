@@ -26,7 +26,7 @@ typedef enum {
     GBA_SAVE_FLASH1M
 } GbaSaveType;
 
-typedef struct {
+typedef struct GbaMemory {
     uint8_t bios[0x4000];      // 16 KB, caller-supplied real dump
     uint8_t ewram[0x40000];    // 256 KB
     uint8_t iwram[0x8000];     // 32 KB
@@ -43,6 +43,20 @@ typedef struct {
     GbaSaveType save_type;
 
     uint32_t bios_open_bus;    // last-fetched opcode, for BIOS open-bus reads
+
+    // ADDED: IO-write dispatch hook. gba_mem_write8/16/32 only stores
+    // bytes into the flat `io` buffer -- something needs to actually call
+    // gba_dma_write_control/gba_timers_write_control/etc when a game
+    // writes those registers, and gba_memory.cpp intentionally doesn't
+    // include dma/timers/ppu/apu headers to stay decoupled. Kept generic
+    // (void* context + function pointer) so the core (gba_core.cpp) can
+    // wire up the real dispatch without this file depending on it.
+    // Fires from gba_mem_write16 only (see gba_memory.cpp note) -- GBA IO
+    // registers are conventionally halfword-addressable; gba_mem_write32
+    // already decomposes into two write16 calls so 32-bit register writes
+    // (DMA SAD/DAD, FIFO_A/B) still reach the hook, just as two halves.
+    void* io_hook_context;
+    void (*io_write_hook)(void* context, uint32_t addr, uint16_t value);
 } GbaMemory;
 
 void gba_mem_init(GbaMemory* mem, const uint8_t* bios, const uint8_t* rom, uint32_t rom_size);

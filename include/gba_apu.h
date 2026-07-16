@@ -31,6 +31,16 @@ typedef struct {
     bool     length_enable;
     uint8_t  length_counter;
     bool     enabled;
+
+    // ADDED: runtime waveform-generation state -- the fields above are all
+    // register mirrors (control only), nothing here actually tracked
+    // where the waveform currently is. See gba_apu.cpp top-of-file note
+    // for the (approximate, first-pass) timing this drives.
+    uint32_t freq_timer_accum; // cycles banked toward next duty step
+    uint8_t  duty_pos;         // 0-7, position in the 8-step duty pattern
+    bool     output_high;      // current digital output level (pre-volume)
+    uint32_t envelope_accum;   // cycles banked toward next envelope step
+    uint32_t length_accum;     // cycles banked toward next 256Hz length clock
 } GbaPsgSquareChannel;
 
 typedef struct {
@@ -40,6 +50,11 @@ typedef struct {
     bool     length_enable;
     uint8_t  length_counter;
     bool     enabled;
+
+    // ADDED: runtime state, see GbaPsgSquareChannel note above.
+    uint32_t freq_timer_accum;
+    uint8_t  sample_pos;       // 0-31, current position in wave_ram
+    uint32_t length_accum;
 } GbaPsgWaveChannel;
 
 typedef struct {
@@ -52,6 +67,15 @@ typedef struct {
     bool     length_enable;
     uint8_t  length_counter;
     bool     enabled;
+
+    // ADDED: runtime state, see GbaPsgSquareChannel note above. LFSR has
+    // no register-visible mirror on real hardware -- it's pure internal
+    // state -- so it lived nowhere until now.
+    uint16_t lfsr;
+    uint32_t freq_timer_accum;
+    bool     output_high;
+    uint32_t envelope_accum;
+    uint32_t length_accum;
 } GbaPsgNoiseChannel;
 
 #define GBA_DIRECTSOUND_FIFO_CAPACITY 32 // bytes; hardware FIFO is 32 bytes deep
@@ -61,6 +85,12 @@ typedef struct {
     uint8_t  read_pos;
     uint8_t  write_pos;
     uint8_t  count;            // bytes currently queued
+
+    // ADDED: last sample popped, held and replayed on underrun (real HW
+    // repeats the last Direct Sound sample when its FIFO runs dry rather
+    // than going silent). Belongs per-instance, not as a function-local
+    // static in gba_apu.cpp's mixer.
+    int8_t   last_sample;
 } GbaDirectSoundFifo;
 
 typedef struct {

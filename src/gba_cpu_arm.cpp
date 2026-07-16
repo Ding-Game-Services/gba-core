@@ -20,11 +20,9 @@ uint32_t gba_cpu_fetch_arm(GbaCpuState* cpu, GbaMemory* mem) {
     return gba_mem_read32(mem, cpu->r[15]);
 }
 
-// CPSR condition flag bit positions
-static const uint32_t FLAG_N = 1u << 31;
-static const uint32_t FLAG_Z = 1u << 30;
-static const uint32_t FLAG_C = 1u << 29;
-static const uint32_t FLAG_V = 1u << 28;
+// CPSR condition flag bit positions -- declared in gba_cpu.h, shared with
+// gba_cpu_thumb.cpp. (Previously redeclared here too, which collided with
+// the header copy at compile time -- removed.)
 
 // Result of decoding a Data Processing operand2: the shifted value plus
 // the carry-out of the shifter (only meaningful/used when S=1 on logical ops).
