@@ -192,7 +192,46 @@ void gba_apu_mix(GbaApuState* apu, int16_t* out_buffer, uint32_t sample_count) {
     int16_t noise_level = apu->noise.enabled && apu->noise.output_high
         ? (int16_t)(apu->noise.volume * 8) : 0;
 
-    int32_t psg_mix = square1_level + square2_level + wave_level + noise_level;
+    // ---- Panning / volume (SOUNDCNT_L, SOUNDCNT_H) ----------------------
+    // SOUNDCNT_L: bits 0-2 PSG master volume RIGHT, bits 4-6 PSG master
+    // volume LEFT (0-7 -> (vol+1)/8 scale per GBATEK), bits 8-11 per-PSG-
+    // channel RIGHT enable (sq1,sq2,wave,noise), bits 12-15 same for LEFT.
+    bool sq1_r   = (apu->soundcnt_l >> 8)  & 1;
+    bool sq2_r   = (apu->soundcnt_l >> 9)  & 1;
+    bool wave_r  = (apu->soundcnt_l >> 10) & 1;
+    bool noise_r = (apu->soundcnt_l >> 11) & 1;
+    bool sq1_l   = (apu->soundcnt_l >> 12) & 1;
+    bool sq2_l   = (apu->soundcnt_l >> 13) & 1;
+    bool wave_l  = (apu->soundcnt_l >> 14) & 1;
+    bool noise_l = (apu->soundcnt_l >> 15) & 1;
+
+    uint32_t psg_vol_r = apu->soundcnt_l & 0x7;
+    uint32_t psg_vol_l = (apu->soundcnt_l >> 4) & 0x7;
+
+    int32_t psg_right = (sq1_r ? square1_level : 0) + (sq2_r ? square2_level : 0)
+                       + (wave_r ? wave_level : 0)   + (noise_r ? noise_level : 0);
+    int32_t psg_left  = (sq1_l ? square1_level : 0) + (sq2_l ? square2_level : 0)
+                       + (wave_l ? wave_level : 0)   + (noise_l ? noise_level : 0);
+
+    psg_right = psg_right * (int32_t)(psg_vol_r + 1) / 8;
+    psg_left  = psg_left  * (int32_t)(psg_vol_l + 1) / 8;
+
+    // SOUNDCNT_H bits 0-1: overall PSG volume ratio (0=25% 1=50% 2=100%,
+    // 3 is prohibited per GBATEK -- treated as 100% here rather than
+    // trapping on it).
+    uint32_t psg_ratio = apu->soundcnt_h & 0x3;
+    int32_t psg_num = (psg_ratio == 0) ? 1 : (psg_ratio == 1) ? 2 : 4;
+    psg_right = psg_right * psg_num / 4;
+    psg_left  = psg_left  * psg_num / 4;
+
+    // SOUNDCNT_H bits 2-3: Direct Sound A/B volume (0=50% 1=100%).
+    // bits 8-9: Direct Sound A right/left enable. bits 12-13: same for B.
+    bool dsa_vol_full = (apu->soundcnt_h >> 2) & 1;
+    bool dsb_vol_full = (apu->soundcnt_h >> 3) & 1;
+    bool dsa_r = (apu->soundcnt_h >> 8)  & 1;
+    bool dsa_l = (apu->soundcnt_h >> 9)  & 1;
+    bool dsb_r = (apu->soundcnt_h >> 12) & 1;
+    bool dsb_l = (apu->soundcnt_h >> 13) & 1;
 
     // Direct Sound: pop whatever's queued, hold last popped sample steady
     // when a FIFO runs dry (matches real hardware's "repeat last sample"
@@ -209,13 +248,21 @@ void gba_apu_mix(GbaApuState* apu, int16_t* out_buffer, uint32_t sample_count) {
             apu->fifo_b.last_sample = fifo_b_sample;
         }
 
-        int32_t direct_sound_mix = ((int32_t)fifo_a_sample + (int32_t)fifo_b_sample) * 4;
+        // Base scale of 2 (50%) / 4 (100%) keeps roughly the same overall
+        // amplitude as the old flat "*4 combined" approximation while now
+        // respecting the volume bit.
+        int32_t a_val = (int32_t)fifo_a_sample * (dsa_vol_full ? 4 : 2);
+        int32_t b_val = (int32_t)fifo_b_sample * (dsb_vol_full ? 4 : 2);
 
-        int32_t total = psg_mix + direct_sound_mix;
-        if (total > 32767) total = 32767;
-        if (total < -32768) total = -32768;
+        int32_t right = psg_right + (dsa_r ? a_val : 0) + (dsb_r ? b_val : 0);
+        int32_t left  = psg_left  + (dsa_l ? a_val : 0) + (dsb_l ? b_val : 0);
 
-        out_buffer[i * 2 + 0] = (int16_t)total; // left
-        out_buffer[i * 2 + 1] = (int16_t)total; // right -- SOUNDCNT_L panning not applied yet, TODO
+        if (right > 32767) right = 32767;
+        if (right < -32768) right = -32768;
+        if (left > 32767) left = 32767;
+        if (left < -32768) left = -32768;
+
+        out_buffer[i * 2 + 0] = (int16_t)left;
+        out_buffer[i * 2 + 1] = (int16_t)right;
     }
 }

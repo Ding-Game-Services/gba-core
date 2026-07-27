@@ -93,7 +93,9 @@ typedef struct {
     int8_t   last_sample;
 } GbaDirectSoundFifo;
 
-typedef struct {
+// Named (not anonymous) so gba_timers.h / gba_cpu.h can forward-declare
+// it as `struct GbaApuState;` without an ODR/typedef mismatch.
+typedef struct GbaApuState {
     GbaPsgSquareChannel square1;
     GbaPsgSquareChannel square2;
     GbaPsgWaveChannel   wave;

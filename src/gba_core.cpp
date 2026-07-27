@@ -17,6 +17,275 @@
 // One-time setup after construction. Does NOT boot the CPU -- no BIOS or
 // ROM is loaded yet at this point, so there's nothing valid to execute.
 // Safe to call exactly once; gba_core_reset is the repeatable entry point.
+// ADDED: IO write dispatcher. gba_memory.h's io_write_hook mechanism
+// existed but nothing ever set it, so every game write to DISPCNT/BGxCNT/
+// DMAxCNT/TMxCNT/SOUNDCNT/etc only updated the flat mem->io[] byte buffer
+// and never reached the subsystem that actually cares. This routes each
+// known register address to the right subsystem call/field.
+static void gba_core_io_write_hook(void* context, uint32_t addr, uint16_t value) {
+    GbaCoreState* state = (GbaCoreState*)context;
+    switch (addr) {
+        // ---- PPU: DISPCNT / DISPSTAT ----
+        case 0x04000000: state->ppu.dispcnt = value; break;
+        case 0x04000004: {
+            // Only bits 3-7 (IRQ enables + vcount-match setting) are
+            // writable; bits 0-2 (VBlank/HBlank/VCounter status flags)
+            // are set by the PPU itself in gba_core_run_frame -- preserve
+            // them instead of letting a game's write clobber them.
+            uint16_t writable_mask = 0xFFF8;
+            state->ppu.dispstat = (state->ppu.dispstat & ~writable_mask) | (value & writable_mask);
+            break;
+        }
+        // BGxCNT
+        case 0x04000008: state->ppu.bg[0].control = value; break;
+        case 0x0400000A: state->ppu.bg[1].control = value; break;
+        case 0x0400000C: state->ppu.bg[2].control = value; break;
+        case 0x0400000E: state->ppu.bg[3].control = value; break;
+        // BGxHOFS/VOFS (write-only, 9-bit)
+        case 0x04000010: state->ppu.bg[0].scroll_x = value & 0x1FF; break;
+        case 0x04000012: state->ppu.bg[0].scroll_y = value & 0x1FF; break;
+        case 0x04000014: state->ppu.bg[1].scroll_x = value & 0x1FF; break;
+        case 0x04000016: state->ppu.bg[1].scroll_y = value & 0x1FF; break;
+        case 0x04000018: state->ppu.bg[2].scroll_x = value & 0x1FF; break;
+        case 0x0400001A: state->ppu.bg[2].scroll_y = value & 0x1FF; break;
+        case 0x0400001C: state->ppu.bg[3].scroll_x = value & 0x1FF; break;
+        case 0x0400001E: state->ppu.bg[3].scroll_y = value & 0x1FF; break;
+        // BG2/BG3 affine PA-PD (8.8 fixed point, fits int16 as-is)
+        case 0x04000020: state->ppu.affine[0].pa = (int16_t)value; break;
+        case 0x04000022: state->ppu.affine[0].pb = (int16_t)value; break;
+        case 0x04000024: state->ppu.affine[0].pc = (int16_t)value; break;
+        case 0x04000026: state->ppu.affine[0].pd = (int16_t)value; break;
+        case 0x04000030: state->ppu.affine[1].pa = (int16_t)value; break;
+        case 0x04000032: state->ppu.affine[1].pb = (int16_t)value; break;
+        case 0x04000034: state->ppu.affine[1].pc = (int16_t)value; break;
+        case 0x04000036: state->ppu.affine[1].pd = (int16_t)value; break;
+// BG2X/Y, BG3X/Y -- 28-bit signed 20.8 fixed-point affine
+        // reference points. Now that GbaAffineParams::ref_x/ref_y is
+        // int32_t (see gba_ppu.h), accumulate lo/hi halves the same way
+        // DMA SAD/DAD do, then sign-extend from bit 27 once the high
+        // half lands (bits 31-28 are unused/undefined on real hardware).
+        case 0x04000028: // BG2X_L
+            state->ppu.affine[0].ref_x = (int32_t)(((uint32_t)state->ppu.affine[0].ref_x & 0xFFFF0000u) | value);
+            break;
+        case 0x0400002A: { // BG2X_H
+            uint32_t raw = ((uint32_t)state->ppu.affine[0].ref_x & 0x0000FFFFu) | ((uint32_t)value << 16);
+            state->ppu.affine[0].ref_x = ((int32_t)(raw << 4)) >> 4; // sign-extend 28-bit field
+            break;
+        }
+        case 0x0400002C: // BG2Y_L
+            state->ppu.affine[0].ref_y = (int32_t)(((uint32_t)state->ppu.affine[0].ref_y & 0xFFFF0000u) | value);
+            break;
+        case 0x0400002E: { // BG2Y_H
+            uint32_t raw = ((uint32_t)state->ppu.affine[0].ref_y & 0x0000FFFFu) | ((uint32_t)value << 16);
+            state->ppu.affine[0].ref_y = ((int32_t)(raw << 4)) >> 4;
+            break;
+        }
+        case 0x04000038: // BG3X_L
+            state->ppu.affine[1].ref_x = (int32_t)(((uint32_t)state->ppu.affine[1].ref_x & 0xFFFF0000u) | value);
+            break;
+        case 0x0400003A: { // BG3X_H
+            uint32_t raw = ((uint32_t)state->ppu.affine[1].ref_x & 0x0000FFFFu) | ((uint32_t)value << 16);
+            state->ppu.affine[1].ref_x = ((int32_t)(raw << 4)) >> 4;
+            break;
+        }
+        case 0x0400003C: // BG3Y_L
+            state->ppu.affine[1].ref_y = (int32_t)(((uint32_t)state->ppu.affine[1].ref_y & 0xFFFF0000u) | value);
+            break;
+case 0x0400003E: { // BG3Y_H
+            uint32_t raw = ((uint32_t)state->ppu.affine[1].ref_y & 0x0000FFFFu) | ((uint32_t)value << 16);
+            state->ppu.affine[1].ref_y = ((int32_t)(raw << 4)) >> 4;
+            break;
+        }
+
+        // ---- Windows ----
+        case 0x04000040: state->ppu.win0h = value; break;
+        case 0x04000042: state->ppu.win1h = value; break;
+        case 0x04000044: state->ppu.win0v = value; break;
+        case 0x04000046: state->ppu.win1v = value; break;
+        case 0x04000048: state->ppu.winin = value; break;
+        case 0x0400004A: state->ppu.winout = value; break;
+
+        // ---- DMA0-3: SAD/DAD (32-bit, written as lo/hi halfwords) + CNT ----
+        case 0x040000B0: state->dma.channels[0].src_addr = (state->dma.channels[0].src_addr & 0xFFFF0000u) | value; break;
+        case 0x040000B2: state->dma.channels[0].src_addr = (state->dma.channels[0].src_addr & 0x0000FFFFu) | ((uint32_t)value << 16); break;
+        case 0x040000B4: state->dma.channels[0].dst_addr = (state->dma.channels[0].dst_addr & 0xFFFF0000u) | value; break;
+        case 0x040000B6: state->dma.channels[0].dst_addr = (state->dma.channels[0].dst_addr & 0x0000FFFFu) | ((uint32_t)value << 16); break;
+        case 0x040000B8: state->dma.channels[0].word_count = value & 0x3FFF; break; // 14-bit on DMA0-2
+        case 0x040000BA: gba_dma_write_control(&state->dma, 0, value); break;
+
+        case 0x040000BC: state->dma.channels[1].src_addr = (state->dma.channels[1].src_addr & 0xFFFF0000u) | value; break;
+        case 0x040000BE: state->dma.channels[1].src_addr = (state->dma.channels[1].src_addr & 0x0000FFFFu) | ((uint32_t)value << 16); break;
+        case 0x040000C0: state->dma.channels[1].dst_addr = (state->dma.channels[1].dst_addr & 0xFFFF0000u) | value; break;
+        case 0x040000C2: state->dma.channels[1].dst_addr = (state->dma.channels[1].dst_addr & 0x0000FFFFu) | ((uint32_t)value << 16); break;
+        case 0x040000C4: state->dma.channels[1].word_count = value & 0x3FFF; break;
+        case 0x040000C6: gba_dma_write_control(&state->dma, 1, value); break;
+
+        case 0x040000C8: state->dma.channels[2].src_addr = (state->dma.channels[2].src_addr & 0xFFFF0000u) | value; break;
+        case 0x040000CA: state->dma.channels[2].src_addr = (state->dma.channels[2].src_addr & 0x0000FFFFu) | ((uint32_t)value << 16); break;
+        case 0x040000CC: state->dma.channels[2].dst_addr = (state->dma.channels[2].dst_addr & 0xFFFF0000u) | value; break;
+        case 0x040000CE: state->dma.channels[2].dst_addr = (state->dma.channels[2].dst_addr & 0x0000FFFFu) | ((uint32_t)value << 16); break;
+        case 0x040000D0: state->dma.channels[2].word_count = value & 0x3FFF; break;
+        case 0x040000D2: gba_dma_write_control(&state->dma, 2, value); break;
+
+        case 0x040000D4: state->dma.channels[3].src_addr = (state->dma.channels[3].src_addr & 0xFFFF0000u) | value; break;
+        case 0x040000D6: state->dma.channels[3].src_addr = (state->dma.channels[3].src_addr & 0x0000FFFFu) | ((uint32_t)value << 16); break;
+        case 0x040000D8: state->dma.channels[3].dst_addr = (state->dma.channels[3].dst_addr & 0xFFFF0000u) | value; break;
+        case 0x040000DA: state->dma.channels[3].dst_addr = (state->dma.channels[3].dst_addr & 0x0000FFFFu) | ((uint32_t)value << 16); break;
+        case 0x040000DC: state->dma.channels[3].word_count = value; break; // DMA3 gets full 16 bits
+        case 0x040000DE: gba_dma_write_control(&state->dma, 3, value); break;
+
+        // ---- Timers ----
+        case 0x04000100: gba_timers_set_reload(&state->timers, 0, value); break;
+        case 0x04000102: gba_timers_write_control(&state->timers, 0, value); break;
+        case 0x04000104: gba_timers_set_reload(&state->timers, 1, value); break;
+        case 0x04000106: gba_timers_write_control(&state->timers, 1, value); break;
+        case 0x04000108: gba_timers_set_reload(&state->timers, 2, value); break;
+        case 0x0400010A: gba_timers_write_control(&state->timers, 2, value); break;
+        case 0x0400010C: gba_timers_set_reload(&state->timers, 3, value); break;
+        case 0x0400010E: gba_timers_write_control(&state->timers, 3, value); break;
+
+        // ---- Interrupts ----
+        case 0x04000200: state->interrupts.ie = value; break;
+        case 0x04000202: gba_interrupts_ack(&state->interrupts, value); break;
+        case 0x04000208: state->interrupts.ime = (value & 0x1) != 0; break;
+
+        // ---- APU: PSG channel 1 (square + sweep). Sweep register
+        // (SOUND1CNT_L, 0x04000060) intentionally not wired -- no sweep
+        // fields exist on GbaPsgSquareChannel yet, see gba_apu.cpp's
+        // file-top scope note. ----
+        case 0x04000062: // SOUND1CNT_H
+            state->apu.square1.length_counter    = 64 - (value & 0x3F);
+            state->apu.square1.duty              = (value >> 6) & 0x3;
+            state->apu.square1.envelope_step     = (value >> 8) & 0x7;
+            state->apu.square1.envelope_increase = (value >> 11) & 0x1;
+            state->apu.square1.volume            = (value >> 12) & 0xF;
+            break;
+        case 0x04000064: // SOUND1CNT_X
+            state->apu.square1.frequency_reg = value & 0x7FF;
+            state->apu.square1.length_enable = (value >> 14) & 0x1;
+            if ((value >> 15) & 0x1) { // restart/trigger bit
+                state->apu.square1.enabled = true;
+                state->apu.square1.duty_pos = 0;
+                state->apu.square1.freq_timer_accum = 0;
+            }
+            break;
+
+        // ---- APU: PSG channel 2 (square, no sweep) ----
+        case 0x04000068: // SOUND2CNT_L
+            state->apu.square2.length_counter    = 64 - (value & 0x3F);
+            state->apu.square2.duty              = (value >> 6) & 0x3;
+            state->apu.square2.envelope_step     = (value >> 8) & 0x7;
+            state->apu.square2.envelope_increase = (value >> 11) & 0x1;
+            state->apu.square2.volume            = (value >> 12) & 0xF;
+            break;
+        case 0x0400006C: // SOUND2CNT_H
+            state->apu.square2.frequency_reg = value & 0x7FF;
+            state->apu.square2.length_enable = (value >> 14) & 0x1;
+            if ((value >> 15) & 0x1) {
+                state->apu.square2.enabled = true;
+                state->apu.square2.duty_pos = 0;
+                state->apu.square2.freq_timer_accum = 0;
+            }
+            break;
+
+        // ---- APU: PSG channel 3 (wave) ----
+        case 0x04000070: // SOUND3CNT_L
+            // TODO: bit5 (wave RAM dual-bank select) not modeled --
+            // GbaPsgWaveChannel::wave_ram is a single 16-byte bank. Bit7
+            // (DAC power) folded into `enabled` for now.
+            state->apu.wave.enabled = (value >> 7) & 0x1;
+            break;
+        case 0x04000072: // SOUND3CNT_H
+            state->apu.wave.length_counter = 256 - (value & 0xFF);
+            state->apu.wave.volume_shift   = (value >> 13) & 0x3;
+            break;
+        case 0x04000074: // SOUND3CNT_X
+            state->apu.wave.frequency_reg = value & 0x7FF;
+            state->apu.wave.length_enable = (value >> 14) & 0x1;
+            if ((value >> 15) & 0x1) {
+                state->apu.wave.enabled = true;
+                state->apu.wave.sample_pos = 0;
+                state->apu.wave.freq_timer_accum = 0;
+            }
+            break;
+
+        // ---- APU: PSG channel 4 (noise) ----
+        case 0x04000078: // SOUND4CNT_L
+            state->apu.noise.length_counter    = 64 - (value & 0x3F);
+            state->apu.noise.envelope_step     = (value >> 8) & 0x7;
+            state->apu.noise.envelope_increase = (value >> 11) & 0x1;
+            state->apu.noise.volume            = (value >> 12) & 0xF;
+            break;
+        case 0x0400007C: // SOUND4CNT_H
+            state->apu.noise.divisor_code  = value & 0x7;
+            state->apu.noise.narrow_mode   = (value >> 3) & 0x1;
+            state->apu.noise.clock_shift   = (value >> 4) & 0xF;
+            state->apu.noise.length_enable = (value >> 14) & 0x1;
+            if ((value >> 15) & 0x1) {
+                state->apu.noise.enabled = true;
+                state->apu.noise.lfsr = 0x7FFF; // standard reset seed
+            }
+            break;
+
+        // ---- APU: master control ----
+        case 0x04000080: state->apu.soundcnt_l = value; break;
+        case 0x04000082: {
+            state->apu.soundcnt_h = value;
+            // Bits 11/15 are write-only FIFO reset triggers, not stored
+            // state -- clear the ring buffer immediately on write.
+            if ((value >> 11) & 0x1) {
+                state->apu.fifo_a.read_pos = 0;
+                state->apu.fifo_a.write_pos = 0;
+                state->apu.fifo_a.count = 0;
+            }
+            if ((value >> 15) & 0x1) {
+                state->apu.fifo_b.read_pos = 0;
+                state->apu.fifo_b.write_pos = 0;
+                state->apu.fifo_b.count = 0;
+            }
+            break;
+        }
+        case 0x04000084:
+            // SOUNDCNT_X -- only bit7 (master enable) is actually
+            // writable per GBATEK, bits 0-3 are read-only per-channel
+            // active status. Storing the whole value for now since
+            // nothing reads soundcnt_x's status bits back yet -- TODO
+            // once per-channel active-status reads are needed.
+            state->apu.soundcnt_x = value;
+            break;
+        case 0x04000088: state->apu.soundbias = value; break;
+
+        // Wave RAM (16 bytes, 8 halfword registers)
+        case 0x04000090: case 0x04000092: case 0x04000094: case 0x04000096:
+        case 0x04000098: case 0x0400009A: case 0x0400009C: case 0x0400009E: {
+            uint32_t off = addr - 0x04000090;
+            state->apu.wave.wave_ram[off]     = (uint8_t)(value & 0xFF);
+            state->apu.wave.wave_ram[off + 1] = (uint8_t)((value >> 8) & 0xFF);
+            break;
+        }
+
+        // FIFO A/B push registers -- a 32-bit write decomposes into two
+        // 16-bit writes here (see gba_memory.cpp), so each halfword push
+        // 2 signed-byte samples to reconstruct the same 4-byte push.
+        case 0x040000A0: case 0x040000A2: {
+            int8_t bytes[2] = { (int8_t)(value & 0xFF), (int8_t)((value >> 8) & 0xFF) };
+            gba_apu_fifo_push(&state->apu, 0, bytes, 2);
+            break;
+        }
+        case 0x040000A4: case 0x040000A6: {
+            int8_t bytes[2] = { (int8_t)(value & 0xFF), (int8_t)((value >> 8) & 0xFF) };
+            gba_apu_fifo_push(&state->apu, 1, bytes, 2);
+            break;
+        }
+
+        default:
+            // Unhandled register. Value is still stored in the flat
+            // mem->io[] buffer by gba_mem_write16 itself, so reads won't
+            // be totally wrong -- just inert until a real handler lands.
+            break;
+    }
+}
+
 void gba_core_init(GbaCoreState* state) {
     gba_cpu_init(&state->cpu);
     gba_interrupts_init(&state->interrupts);
@@ -25,6 +294,8 @@ void gba_core_init(GbaCoreState* state) {
     // gba_core_reset once both are loaded, so this just zeroes the
     // memory arrays via a null/zero-size init.
     gba_mem_init(&state->memory, nullptr, nullptr, 0);
+    state->memory.io_hook_context = state;
+    state->memory.io_write_hook = gba_core_io_write_hook;
 
     state->bios.data     = nullptr;
     state->bios.size     = 0;
@@ -85,6 +356,8 @@ bool gba_core_reset(GbaCoreState* state) {
     gba_cpu_init(&state->cpu);
     gba_interrupts_init(&state->interrupts);
     gba_mem_init(&state->memory, state->bios.data, state->memory.rom, state->memory.rom_size);
+    state->memory.io_hook_context = state;
+    state->memory.io_write_hook = gba_core_io_write_hook;
 
     // Real hardware boots executing BIOS from 0x00000000 in Supervisor
     // mode, IRQ/FIQ disabled (I and F bits set), ARM state (not Thumb).
@@ -138,6 +411,19 @@ static void fire_dma(GbaCoreState* state, GbaDmaTiming reason) {
     }
 }
 
+// ADDED: closes the gap flagged in gba_apu.cpp's file-top note --
+// gba_apu_timer_tick pops FIFO samples but has no GbaDmaState* to signal
+// a refill with. Convention (per gba_dma.h/gba_apu.h comments): DMA1
+// feeds FIFO A, DMA2 feeds FIFO B. Standard GBA behavior refills once the
+// FIFO drops to half-full (16 of 32 bytes) rather than waiting for empty.
+static void check_fifo_refill(GbaCoreState* state, int fifo_index, int dma_channel) {
+    GbaDirectSoundFifo* fifo = (fifo_index == 0) ? &state->apu.fifo_a : &state->apu.fifo_b;
+    if (fifo->count <= 16) {
+        gba_dma_trigger(&state->dma, dma_channel, GBA_DMA_TIMING_SPECIAL);
+        gba_dma_step(&state->dma, &state->memory, dma_channel);
+    }
+}
+
 // Advances the whole machine by one frame: CPU runs instruction-by-
 // instruction (variable cycle cost per gba_cpu_step's return value),
 // PPU/timers/DMA/APU are advanced by that same cycle count, scanline by
@@ -173,11 +459,13 @@ void gba_core_run_frame(GbaCoreState* state) {
 
         // --- HDraw portion of the line ---
         state->ppu.dispstat &= ~DISPSTAT_HBLANK_FLAG;
-        uint32_t hdraw_elapsed = 0;
+uint32_t hdraw_elapsed = 0;
         while (hdraw_elapsed < GBA_CYCLES_PER_HDRAW) {
             uint32_t cycles = gba_cpu_step(&state->cpu, &state->memory, &state->interrupts);
             gba_timers_step(&state->timers, cycles, &state->interrupts, &state->apu);
             gba_apu_step(&state->apu, cycles);
+            check_fifo_refill(state, 0, 1); // FIFO A <- DMA1
+            check_fifo_refill(state, 1, 2); // FIFO B <- DMA2
             hdraw_elapsed += cycles;
         }
 
@@ -190,14 +478,15 @@ void gba_core_run_frame(GbaCoreState* state) {
         }
         fire_dma(state, GBA_DMA_TIMING_HBLANK);
 
-        uint32_t hblank_elapsed = 0;
+uint32_t hblank_elapsed = 0;
         while (hblank_elapsed < GBA_CYCLES_PER_HBLANK) {
             uint32_t cycles = gba_cpu_step(&state->cpu, &state->memory, &state->interrupts);
             gba_timers_step(&state->timers, cycles, &state->interrupts, &state->apu);
             gba_apu_step(&state->apu, cycles);
+            check_fifo_refill(state, 0, 1); // FIFO A <- DMA1
+            check_fifo_refill(state, 1, 2); // FIFO B <- DMA2
             hblank_elapsed += cycles;
         }
-    }
 
     // Per-frame render (see gba_ppu.h's top-of-file plan comment: whole
     // screen drawn in one pass from end-of-frame register/VRAM state,

@@ -10,6 +10,7 @@
 #include "gba_timers.h"
 #include "gba_interrupts.h"
 #include "gba_bios.h"
+#include "ding_types.h" // u8/u16/u32/etc aliases, used by GbaCoreState::rom_md5
 #include "ding_audio.h"
 #include "ding_md5.h"
 #include "ding_core.h" // DingMemoryRegion, used by gba_core_get_memory_region

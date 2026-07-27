@@ -30,7 +30,9 @@ typedef enum {
     GBA_IRQ_GAMEPAK  = 1 << 13
 } GbaIrqSource;
 
-typedef struct {
+// Named (not anonymous) so gba_cpu.h / gba_timers.h can forward-declare
+// it as `struct GbaInterruptState;` without an ODR/typedef mismatch.
+typedef struct GbaInterruptState {
     uint16_t ie;    // Interrupt Enable register mirror
     uint16_t if_;   // Interrupt Flag/request register mirror (write-1-to-ack)
     bool ime;       // master enable

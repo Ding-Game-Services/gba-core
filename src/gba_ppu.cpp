@@ -7,13 +7,13 @@
 //
 // SCOPE FOR THIS PASS (flagging cuts explicitly rather than leaving silent
 // gaps):
-//  - Implemented: Mode 0 (regular/non-affine tile BGs, all 4 layers),
-//    Mode 3 (16bpp bitmap), Mode 4 (8bpp paletted bitmap, both pages),
-//    regular (non-affine) sprites with shape/size/priority compositing.
-//  - NOT implemented yet, each flagged at its hook point below: affine BG
-//    layers (Mode 1's BG2, Mode 2's BG2/3), affine sprites, Mode 5,
-//    mosaic, windows, alpha blending (OBJ semi-transparent mode falls
-//    back to normal opaque draw for now).
+//  - Implemented: Mode 0 (regular tile BGs, all 4 layers), Mode 1/2
+//    (affine BG2/BG3), Mode 3/4/5 (bitmap), regular and affine sprites
+//    with shape/size/priority compositing, Win0/Win1/Outside windows.
+//  - NOT implemented yet, each flagged at its hook point below: Obj
+//    Window containment (falls back to WINOUT's "outside" bits), mosaic,
+//    alpha blending (OBJ semi-transparent mode falls back to normal
+//    opaque draw for now).
 //
 // Compositing model: for priority level p = 3 down to 0, draw enabled
 // regular BG layers at that priority (BG index 3 down to 0, so lower BG
@@ -42,6 +42,12 @@ void gba_ppu_init(GbaPpuState* ppu) {
     ppu->dispcnt = 0;
     ppu->dispstat = 0;
     ppu->vcount = 0;
+    ppu->win0h = 0;
+    ppu->win0v = 0;
+    ppu->win1h = 0;
+    ppu->win1v = 0;
+    ppu->winin = 0;
+    ppu->winout = 0;
     for (int i = 0; i < 4; i++) {
         ppu->bg[i].control = 0;
         ppu->bg[i].scroll_x = 0;
@@ -158,6 +164,52 @@ static uint32_t gba_ppu_sample_bg_pixel(GbaMemory* mem, const GbaBgParams& bp,
     return gba_ppu_bgr555_to_rgba8888(raw);
 }
 
+// ---- Windows ------------------------------------------------------
+//
+// Win0 > Win1 > Obj Window > Outside, in that priority order (first
+// window a pixel falls inside wins). Obj Window containment isn't
+// modeled yet -- it requires OBJ-mode-2 sprites to render into a
+// separate mask instead of drawing color, which belongs with the
+// semi-transparent-OBJ/blending work still to come (see the existing
+// obj_mode==2 "falls back to opaque draw" note in the sprite draw
+// function). Until then, pixels that would fall in the Obj Window use
+// the WINOUT "outside" bits as a stand-in.
+static bool gba_ppu_point_in_window(uint16_t h, uint16_t v, int x, int y) {
+    int x1 = (h >> 8) & 0xFF;
+    int x2 = h & 0xFF;
+    int y1 = (v >> 8) & 0xFF;
+    int y2 = v & 0xFF;
+    // GBATEK: if X2 > screen width or X2 < X1 (garbage/degenerate), treat
+    // X2 as extending to the screen edge. Same for Y2. Common simplified
+    // handling also used by other emulators for this edge case.
+    if (x2 > GBA_SCREEN_WIDTH || x2 < x1) x2 = GBA_SCREEN_WIDTH;
+    if (y2 > GBA_SCREEN_HEIGHT || y2 < y1) y2 = GBA_SCREEN_HEIGHT;
+    return x >= x1 && x < x2 && y >= y1 && y < y2;
+}
+
+// layer_bit: 0-3 = BG0-3, 4 = OBJ (matches WININ/WINOUT bit layout).
+// Returns true (layer visible at this pixel) unconditionally if no
+// window is enabled at all, matching hardware's "windows off" behavior.
+static bool gba_ppu_window_layer_enabled(const GbaPpuState* ppu, int x, int y, int layer_bit) {
+    bool win0_enabled = (ppu->dispcnt >> 13) & 1;
+    bool win1_enabled = (ppu->dispcnt >> 14) & 1;
+    bool winobj_enabled = (ppu->dispcnt >> 15) & 1;
+
+    if (!win0_enabled && !win1_enabled && !winobj_enabled) {
+        return true;
+    }
+
+    if (win0_enabled && gba_ppu_point_in_window(ppu->win0h, ppu->win0v, x, y)) {
+        return (ppu->winin >> layer_bit) & 1;
+    }
+    if (win1_enabled && gba_ppu_point_in_window(ppu->win1h, ppu->win1v, x, y)) {
+        return (ppu->winin >> (8 + layer_bit)) & 1;
+    }
+    // TODO: Obj Window containment -- see function-top note. Falls
+    // through to WINOUT's "outside" bits for now.
+    return (ppu->winout >> layer_bit) & 1;
+}
+
 static void gba_ppu_draw_bg_layer(GbaPpuState* ppu, GbaMemory* mem, int bg_index) {
     GbaBgParams bp = gba_ppu_parse_bg_control(ppu->bg[bg_index].control);
     uint16_t scroll_x = ppu->bg[bg_index].scroll_x;
@@ -165,11 +217,80 @@ static void gba_ppu_draw_bg_layer(GbaPpuState* ppu, GbaMemory* mem, int bg_index
 
     for (int y = 0; y < GBA_SCREEN_HEIGHT; y++) {
         for (int x = 0; x < GBA_SCREEN_WIDTH; x++) {
+            if (!gba_ppu_window_layer_enabled(ppu, x, y, bg_index)) continue;
             bool opaque = false;
             uint32_t color = gba_ppu_sample_bg_pixel(mem, bp, x + scroll_x, y + scroll_y, &opaque);
             if (opaque) {
                 ppu->framebuffer[y * GBA_SCREEN_WIDTH + x] = color;
             }
+        }
+    }
+}
+
+// ---- Affine BG rendering (Mode 1's BG2, Mode 2's BG2+BG3) -------------
+//
+// Affine BGs differ from regular BGs in three ways: the tilemap is a flat
+// array of single-byte tile indices (no per-entry flip/palette-bank bits),
+// tiles are always 8bpp/256-color, and the on-screen position comes from
+// a 2x2 rotation/scale matrix (BGxPA-PD) applied to a reference point
+// (BGxX/Y) instead of a simple HOFS/VOFS scroll. Per-frame render (same
+// caveat as the rest of this file): reads the current register values
+// once for the whole frame, so mid-frame HBlank reference-point updates
+// (the classic Mode 7-style per-scanline effect) aren't reproduced yet.
+static void gba_ppu_draw_affine_bg_layer(GbaPpuState* ppu, GbaMemory* mem, int bg_index) {
+    uint16_t control = ppu->bg[bg_index].control;
+    uint32_t char_base   = ((control >> 2) & 0x3) * 0x4000;
+    uint32_t screen_base = ((control >> 8) & 0x1F) * 0x800;
+    bool wrap            = (control >> 13) & 0x1; // Display Area Overflow: 1=wrap, 0=transparent outside
+    uint8_t size_code    = (control >> 14) & 0x3;
+    uint32_t size_px     = 128u << size_code; // 128/256/512/1024 -- affine BGs are always square
+
+    const GbaAffineParams& aff = ppu->affine[bg_index - 2]; // BG2->affine[0], BG3->affine[1]
+
+for (int y = 0; y < GBA_SCREEN_HEIGHT; y++) {
+        for (int x = 0; x < GBA_SCREEN_WIDTH; x++) {
+            if (!gba_ppu_window_layer_enabled(ppu, x, y, bg_index)) continue;
+
+            // pa-pd are 8.8 fixed point, ref_x/ref_y are 20.8 -- same
+            // fractional width, so straight addition after the multiply
+            // lines up correctly.
+            int32_t tex_x_fp = aff.ref_x + aff.pa * x + aff.pb * y;
+            int32_t tex_y_fp = aff.ref_y + aff.pc * x + aff.pd * y;
+
+            int32_t px = tex_x_fp >> 8; // arithmetic shift -- handles negative correctly
+            int32_t py = tex_y_fp >> 8;
+
+            if (wrap) {
+                px &= (int32_t)(size_px - 1);
+                py &= (int32_t)(size_px - 1);
+            } else if (px < 0 || py < 0 || px >= (int32_t)size_px || py >= (int32_t)size_px) {
+                continue; // outside the affine surface -- transparent
+            }
+
+            uint32_t tile_x = (uint32_t)px / 8;
+            uint32_t tile_y = (uint32_t)py / 8;
+            uint32_t within_x = (uint32_t)px % 8;
+            uint32_t within_y = (uint32_t)py % 8;
+            uint32_t tiles_per_row = size_px / 8;
+
+            // Affine tilemap: one byte per entry (tile index 0-255), no
+            // flip/palette-bank bits, contiguous single block (no 32x32
+            // sub-block layout like regular BG screen blocks).
+            uint32_t map_offset = screen_base + tile_y * tiles_per_row + tile_x;
+            if (map_offset >= sizeof(mem->vram)) continue;
+            uint8_t tile_index = mem->vram[map_offset];
+
+            uint32_t tile_offset = char_base + (uint32_t)tile_index * 64; // 64 bytes/tile at 8bpp
+            uint32_t byte_offset = tile_offset + within_y * 8 + within_x;
+            if (byte_offset >= sizeof(mem->vram)) continue;
+            uint8_t color_index = mem->vram[byte_offset];
+            if (color_index == 0) continue; // transparent
+
+            uint32_t pal_offset = GBA_BG_PALETTE_OFFSET + color_index * 2;
+            if (pal_offset + 1 >= sizeof(mem->palette)) continue;
+            uint16_t raw = (uint16_t)(mem->palette[pal_offset] | (mem->palette[pal_offset + 1] << 8));
+
+            ppu->framebuffer[y * GBA_SCREEN_WIDTH + x] = gba_ppu_bgr555_to_rgba8888(raw);
         }
     }
 }
@@ -199,10 +320,13 @@ static void gba_ppu_draw_sprites_at_priority(GbaPpuState* ppu, GbaMemory* mem, u
         uint16_t attr2 = (uint16_t)(mem->oam[base + 4] | (mem->oam[base + 5] << 8));
 
         bool affine_flag = (attr0 >> 8) & 1;
-        if (affine_flag) continue; // TODO: affine sprites -- see file-top scope note
 
-        bool disabled = (attr0 >> 9) & 1; // only meaningful when affine_flag==0
-        if (disabled) continue;
+        // Bit 9 is overloaded: for regular sprites it's the disable bit,
+        // for affine sprites it's "double-size" (doubles the on-screen
+        // bounding box so a rotated sprite doesn't clip against its own
+        // unrotated tile bounds).
+        bool bit9 = (attr0 >> 9) & 1;
+        if (!affine_flag && bit9) continue; // regular sprite, disabled
 
         uint8_t shape = (attr0 >> 14) & 0x3;
         if (shape == 3) continue; // prohibited
@@ -225,8 +349,6 @@ static void gba_ppu_draw_sprites_at_priority(GbaPpuState* ppu, GbaMemory* mem, u
         int32_t x = attr1 & 0x1FF;
         if (x >= 240) x -= 512; // signed X (9-bit two's complement)
 
-        bool hflip = (attr1 >> 12) & 1;
-        bool vflip = (attr1 >> 13) & 1;
         uint32_t tile_index = attr2 & 0x3FF;
         uint32_t palette_bank = (attr2 >> 12) & 0xF; // 4bpp only
 
@@ -234,22 +356,113 @@ static void gba_ppu_draw_sprites_at_priority(GbaPpuState* ppu, GbaMemory* mem, u
         // layout), regardless of sprite width -- see GBATEK "OBJ VRAM
         // Character Data".
         uint32_t tile_w = dims.w / 8;
-        uint32_t tile_h = dims.h / 8;
 
-        for (uint32_t py = 0; py < (uint32_t)dims.h; py++) {
-            int32_t screen_y = y + (int32_t)py;
+        if (!affine_flag) {
+            bool hflip = (attr1 >> 12) & 1;
+            bool vflip = (attr1 >> 13) & 1;
+
+            for (uint32_t py = 0; py < (uint32_t)dims.h; py++) {
+                int32_t screen_y = y + (int32_t)py;
+                if (screen_y < 0 || screen_y >= GBA_SCREEN_HEIGHT) continue;
+
+for (uint32_t px = 0; px < (uint32_t)dims.w; px++) {
+                    int32_t screen_x = x + (int32_t)px;
+                    if (screen_x < 0 || screen_x >= GBA_SCREEN_WIDTH) continue;
+                    if (!gba_ppu_window_layer_enabled(ppu, screen_x, screen_y, 4)) continue;
+
+                    uint32_t sx = hflip ? (dims.w - 1 - px) : px;
+                    uint32_t sy = vflip ? (dims.h - 1 - py) : py;
+                    uint32_t tile_col = sx / 8;
+                    uint32_t tile_row = sy / 8;
+                    uint32_t within_x = sx % 8;
+                    uint32_t within_y = sy % 8;
+
+                    uint32_t this_tile = color_256
+                        ? (tile_index + (obj_1d_mapping ? (tile_row * tile_w + tile_col) * 2
+                                                         : (tile_row * 32 + tile_col) * 2))
+                        : (tile_index + (obj_1d_mapping ? (tile_row * tile_w + tile_col)
+                                                         : (tile_row * 32 + tile_col)));
+
+                    uint8_t color_index;
+                    if (color_256) {
+                        uint32_t tile_offset = obj_char_base + this_tile * 64;
+                        uint32_t byte_offset = tile_offset + within_y * 8 + within_x;
+                        if (byte_offset >= sizeof(mem->vram)) continue;
+                        color_index = mem->vram[byte_offset];
+                    } else {
+                        uint32_t tile_offset = obj_char_base + this_tile * 32;
+                        uint32_t byte_offset = tile_offset + within_y * 4 + (within_x / 2);
+                        if (byte_offset >= sizeof(mem->vram)) continue;
+                        uint8_t packed = mem->vram[byte_offset];
+                        color_index = (within_x & 1) ? (packed >> 4) : (packed & 0xF);
+                    }
+
+                    if (color_index == 0) continue; // transparent
+
+                    uint32_t pal_offset = color_256
+                        ? (GBA_OBJ_PALETTE_OFFSET + color_index * 2)
+                        : (GBA_OBJ_PALETTE_OFFSET + (palette_bank * 16 + color_index) * 2);
+                    if (pal_offset + 1 >= sizeof(mem->palette)) continue;
+                    uint16_t raw = (uint16_t)(mem->palette[pal_offset] | (mem->palette[pal_offset + 1] << 8));
+
+                    ppu->framebuffer[screen_y * GBA_SCREEN_WIDTH + screen_x] = gba_ppu_bgr555_to_rgba8888(raw);
+                }
+            }
+            continue;
+        }
+
+        // ---- Affine sprite ----
+        // attr1 bits 9-13 select one of 32 shared affine parameter groups
+        // (not per-sprite storage). Each group's PA/PB/PC/PD live in the
+        // attr3 field (OAM bytes 6-7) of 4 consecutive OAM entries
+        // (group*4 + 0..3 respectively), 8.8 fixed point -- flip bits
+        // (attr1 12-13) don't apply to affine sprites, the matrix handles
+        // orientation instead.
+        bool double_size = bit9;
+        uint32_t param_select = (attr1 >> 9) & 0x1F;
+        uint32_t group_base = param_select * 4;
+
+        auto read_affine_param = [&](uint32_t entry_index) -> int16_t {
+            uint32_t off = entry_index * 8 + 6; // attr3 of that OAM entry
+            if (off + 1 >= sizeof(mem->oam)) return 0x100; // identity fallback
+            return (int16_t)(mem->oam[off] | (mem->oam[off + 1] << 8));
+        };
+        int16_t pa = read_affine_param(group_base + 0);
+        int16_t pb = read_affine_param(group_base + 1);
+        int16_t pc = read_affine_param(group_base + 2);
+        int16_t pd = read_affine_param(group_base + 3);
+
+        int32_t half_w = (int32_t)dims.w / 2;
+        int32_t half_h = (int32_t)dims.h / 2;
+        int32_t bound_w = double_size ? (int32_t)dims.w * 2 : (int32_t)dims.w;
+        int32_t bound_h = double_size ? (int32_t)dims.h * 2 : (int32_t)dims.h;
+        int32_t half_bound_w = bound_w / 2;
+        int32_t half_bound_h = bound_h / 2;
+
+        // Walk the screen-space bounding box and inverse-transform each
+        // pixel back into (unrotated) sprite texture space -- opposite
+        // direction from the regular-sprite loop above, which walks
+        // texture space forward.
+        for (int32_t sy = 0; sy < bound_h; sy++) {
+            int32_t screen_y = y + sy;
             if (screen_y < 0 || screen_y >= GBA_SCREEN_HEIGHT) continue;
+            int32_t ay = sy - half_bound_h;
 
-            for (uint32_t px = 0; px < (uint32_t)dims.w; px++) {
-                int32_t screen_x = x + (int32_t)px;
+for (int32_t sx = 0; sx < bound_w; sx++) {
+                int32_t screen_x = x + sx;
                 if (screen_x < 0 || screen_x >= GBA_SCREEN_WIDTH) continue;
+                if (!gba_ppu_window_layer_enabled(ppu, screen_x, screen_y, 4)) continue;
+                int32_t ax = sx - half_bound_w;
 
-                uint32_t sx = hflip ? (dims.w - 1 - px) : px;
-                uint32_t sy = vflip ? (dims.h - 1 - py) : py;
-                uint32_t tile_col = sx / 8;
-                uint32_t tile_row = sy / 8;
-                uint32_t within_x = sx % 8;
-                uint32_t within_y = sy % 8;
+                int32_t tex_x = ((pa * ax + pb * ay) >> 8) + half_w;
+                int32_t tex_y = ((pc * ax + pd * ay) >> 8) + half_h;
+
+                if (tex_x < 0 || tex_x >= (int32_t)dims.w || tex_y < 0 || tex_y >= (int32_t)dims.h) continue;
+
+                uint32_t tile_col = (uint32_t)tex_x / 8;
+                uint32_t tile_row = (uint32_t)tex_y / 8;
+                uint32_t within_x = (uint32_t)tex_x % 8;
+                uint32_t within_y = (uint32_t)tex_y % 8;
 
                 uint32_t this_tile = color_256
                     ? (tile_index + (obj_1d_mapping ? (tile_row * tile_w + tile_col) * 2
@@ -315,6 +528,28 @@ static void gba_ppu_draw_mode4(GbaPpuState* ppu, GbaMemory* mem) {
     }
 }
 
+#define GBA_MODE5_WIDTH  160
+#define GBA_MODE5_HEIGHT 128
+
+// Mode 5: 160x128 16bpp bitmap, double-buffered like Mode 4. The bitmap
+// is smaller than the 240x160 screen -- real hardware shows leftover
+// VRAM data reinterpreted as pixels outside that area, which isn't worth
+// modeling. Left as backdrop (already filled in by the caller before this
+// runs) -- flagged simplification, not a silent gap.
+static void gba_ppu_draw_mode5(GbaPpuState* ppu, GbaMemory* mem) {
+    bool page1 = (ppu->dispcnt >> 4) & 1;
+    uint32_t page_base = page1 ? 0xA000 : 0;
+
+    for (int y = 0; y < GBA_MODE5_HEIGHT; y++) {
+        for (int x = 0; x < GBA_MODE5_WIDTH; x++) {
+            uint32_t off = page_base + (y * GBA_MODE5_WIDTH + x) * 2;
+            if (off + 1 >= sizeof(mem->vram)) continue;
+            uint16_t raw = (uint16_t)(mem->vram[off] | (mem->vram[off + 1] << 8));
+            ppu->framebuffer[y * GBA_SCREEN_WIDTH + x] = gba_ppu_bgr555_to_rgba8888(raw);
+        }
+    }
+}
+
 // ---- Top level -----------------------------------------------------
 
 void gba_ppu_render_frame(GbaPpuState* ppu, GbaMemory* mem) {
@@ -359,9 +594,13 @@ void gba_ppu_render_frame(GbaPpuState* ppu, GbaMemory* mem) {
         return;
     }
 
-    if (mode == 5) {
-        // TODO: Mode 5 (160x128 16bpp bitmap, two pages) -- see file-top
-        // scope note. Falls through to backdrop-only for now.
+if (mode == 5) {
+        gba_ppu_draw_mode5(ppu, mem);
+        if (obj_enabled) {
+            for (int p = 3; p >= 0; p--) {
+                gba_ppu_draw_sprites_at_priority(ppu, mem, (uint8_t)p);
+            }
+        }
         return;
     }
 
@@ -385,7 +624,8 @@ void gba_ppu_render_frame(GbaPpuState* ppu, GbaMemory* mem) {
     // BG2+BG3 in mode 2) which isn't implemented yet -- see file-top scope
     // note. Draw whichever of their layers are regular (mode 1's BG0/BG1)
     // and leave the affine ones as backdrop for now.
-    if (mode == 1) {
+if (mode == 1) {
+        bool bg2_enabled = (ppu->dispcnt >> 10) & 1;
         for (int p = 3; p >= 0; p--) {
             for (int bg = 1; bg >= 0; bg--) { // BG0, BG1 only -- regular
                 bool bg_enabled = (ppu->dispcnt >> (8 + bg)) & 1;
@@ -394,13 +634,36 @@ void gba_ppu_render_frame(GbaPpuState* ppu, GbaMemory* mem) {
                 if (bp.priority != (uint8_t)p) continue;
                 gba_ppu_draw_bg_layer(ppu, mem, bg);
             }
-            // TODO: BG2 affine layer for this priority level
+            if (bg2_enabled && (ppu->bg[2].control & 0x3) == (uint8_t)p) {
+                gba_ppu_draw_affine_bg_layer(ppu, mem, 2);
+            }
             if (obj_enabled) {
                 gba_ppu_draw_sprites_at_priority(ppu, mem, (uint8_t)p);
             }
         }
         return;
     }
+
+    // mode == 2: both active layers (BG2, BG3) are affine.
+    {
+        bool bg2_enabled = (ppu->dispcnt >> 10) & 1;
+        bool bg3_enabled = (ppu->dispcnt >> 11) & 1;
+        for (int p = 3; p >= 0; p--) {
+            // Draw BG3 before BG2 at a tied priority so BG2 (lower index)
+            // ends up on top, matching Mode 0's own BG-index tie-break
+            // convention (see that block's comment above).
+            if (bg3_enabled && (ppu->bg[3].control & 0x3) == (uint8_t)p) {
+                gba_ppu_draw_affine_bg_layer(ppu, mem, 3);
+            }
+            if (bg2_enabled && (ppu->bg[2].control & 0x3) == (uint8_t)p) {
+                gba_ppu_draw_affine_bg_layer(ppu, mem, 2);
+            }
+            if (obj_enabled) {
+                gba_ppu_draw_sprites_at_priority(ppu, mem, (uint8_t)p);
+            }
+        }
+    }
+}
 
     // mode == 2: both active layers (BG2, BG3) are affine -- TODO entirely.
     if (obj_enabled) {
