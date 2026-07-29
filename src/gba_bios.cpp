@@ -1,21 +1,36 @@
 #include "gba_bios.h"
+#include <cstring>
 
 // BIOS implementation
 //
-// DELIVERY NOTE: this file only cares about receiving a byte buffer --
-// how those bytes arrive is a frontend concern, not a core concern:
-//  - Hydra (native): read file from configured path via fread(), pass
-//    bytes+size straight to gba_bios_load()
-//  - Browser (WASM): no filesystem access. Frontend JS gets bytes via
-//    file upload (<input type=file>) or IndexedDB cache (avoid re-upload
-//    every session), then copies them into WASM memory and calls
-//    gba_bios_load() same as native -- same pattern as ROM loading.
-// Core stays portable either way; keep it that way.
-//
-// Plan:
-//  - gba_bios_load: copy/reference the given buffer, run validation
-//  - gba_bios_validate: check size == 16384 bytes (real GBA BIOS size);
-//    optionally checksum against known-good BIOS hash later
+// See gba_bios.h for the delivery-path plan (native fread vs browser
+// upload/IndexedDB) -- this file only touches bytes it's handed.
 
-// TODO: bool gba_bios_load(GbaBiosDescriptor* bios, const uint8_t* data, size_t size)
-// TODO: bool gba_bios_validate(const GbaBiosDescriptor* bios)
+bool gba_bios_load(GbaBiosDescriptor* bios, const uint8_t* data, size_t size) {
+    if (bios == nullptr || data == nullptr || size == 0) {
+        return false;
+    }
+
+    // Caller-owned, not copied -- matches GbaMemory::rom convention
+    // (see gba_bios.h struct comment).
+    bios->data = data;
+    bios->size = size;
+    bios->is_valid = gba_bios_validate(bios);
+
+    return bios->is_valid;
+}
+
+bool gba_bios_validate(const GbaBiosDescriptor* bios) {
+    if (bios == nullptr || bios->data == nullptr) {
+        return false;
+    }
+
+    // Real GBA BIOS is exactly 16 KB. Not checksumming against a known
+    // hash yet (see header TODO) -- deliberately permissive so homebrew
+    ///open-source replacement BIOSes of the correct size aren't rejected.
+    if (bios->size != 0x4000) {
+        return false;
+    }
+
+    return true;
+}
