@@ -39,8 +39,19 @@ typedef struct {
     uint32_t freq_timer_accum; // cycles banked toward next duty step
     uint8_t  duty_pos;         // 0-7, position in the 8-step duty pattern
     bool     output_high;      // current digital output level (pre-volume)
-    uint32_t envelope_accum;   // cycles banked toward next envelope step
+uint32_t envelope_accum;   // cycles banked toward next envelope step
     uint32_t length_accum;     // cycles banked toward next 256Hz length clock
+
+    // ADDED: frequency sweep (SOUND1CNT_L). Only channel 1 has sweep
+    // hardware on real GBA/GB -- these fields exist on the shared struct
+    // for both channels, but square2's sweep_period stays 0 (nothing
+    // ever writes SOUND2's equivalent, there isn't one), so the sweep
+    // step function no-ops for it.
+    uint8_t  sweep_period;      // 0-7, 0 disables periodic sweep clocking
+    bool     sweep_negate;      // true = frequency decreases
+    uint8_t  sweep_shift;       // 0-7, 0 = timer reloads but no frequency change
+    uint32_t sweep_accum;       // cycles banked toward next 128Hz sweep clock
+    uint16_t sweep_shadow_freq; // internal working copy, distinct from frequency_reg per real hardware sweep behavior
 } GbaPsgSquareChannel;
 
 typedef struct {

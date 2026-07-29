@@ -53,9 +53,30 @@ typedef struct {
     // duplicated here.
     uint16_t win0h, win0v; // bits 15-8=X1/Y1 (left/top), bits 7-0=X2/Y2 (right/bottom, exclusive)
     uint16_t win1h, win1v;
-    uint16_t winin;  // bits 0-5 = Win0 BG0-3/OBJ/effect enable, bits 8-13 = Win1 same
+uint16_t winin;  // bits 0-5 = Win0 BG0-3/OBJ/effect enable, bits 8-13 = Win1 same
     uint16_t winout; // bits 0-5 = Outside BG0-3/OBJ/effect enable, bits 8-13 = ObjWin same (ObjWin containment itself deferred, see gba_ppu.cpp)
-    uint16_t vcount;
+    uint16_t mosaic; // bits 0-3 BG H size-1, 4-7 BG V size-1, 8-11 OBJ H size-1, 12-15 OBJ V size-1
+uint16_t vcount;
+
+    // ADDED: color special effects (BLDCNT/BLDALPHA/BLDY).
+    uint16_t bldcnt;   // bits 0-5 target1 layer mask, 6-7 effect mode, 8-13 target2 layer mask
+    uint16_t bldalpha; // bits 0-4 EVA (target1 coeff), 8-12 EVB (target2 coeff)
+    uint16_t bldy;     // bits 0-4 EVY (brightness coeff)
+
+    // ADDED: per-pixel top/second-layer tracking, rebuilt every frame in
+    // gba_ppu_render_frame and updated by gba_ppu_plot_pixel as each
+    // layer draws. Blending only ever needs the frontmost 2 visible
+    // layers at a pixel (matches real hardware), not a full stack.
+    // Layer ids: 0-3=BG0-3, 4=OBJ, 5=Backdrop.
+    uint32_t blend_second_color[GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT];
+    uint8_t  blend_top_layer[GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT];
+    uint8_t  blend_second_layer[GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT];
+    uint8_t  blend_obj_semi_transparent[GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT]; // OBJ mode==1 forces alpha blend regardless of BLDCNT mode
+
+    // ADDED: Obj Window containment mask, rebuilt every frame by
+    // gba_ppu_build_obj_window_mask from OBJ-mode-2 sprites (see that
+    // function in gba_ppu.cpp). 1 = pixel is inside the Obj Window.
+    uint8_t  obj_window_mask[GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT];
 
     GbaBgLayer bg[4];           // BG0-3
     GbaAffineParams affine[2];  // BG2, BG3 (only these two support affine)

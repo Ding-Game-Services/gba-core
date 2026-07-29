@@ -22,6 +22,38 @@
 // DMAxCNT/TMxCNT/SOUNDCNT/etc only updated the flat mem->io[] byte buffer
 // and never reached the subsystem that actually cares. This routes each
 // known register address to the right subsystem call/field.
+// ADDED: read-side counterpart to gba_core_io_write_hook. Covers the
+// registers whose value changes from live hardware activity rather than
+// game writes -- see gba_memory.h's io_read_hook comment. Everything not
+// listed here just passes raw_value through untouched (i.e. whatever the
+// game last wrote there), which is correct for pure control registers.
+static uint16_t gba_core_io_read_hook(void* context, uint32_t addr, uint16_t raw_value) {
+    GbaCoreState* state = (GbaCoreState*)context;
+    switch (addr) {
+        // DISPSTAT: ppu.dispstat is already the authoritative live value
+        // (status bits set directly in gba_core_run_frame, IRQ-enable
+        // bits set via the write hook's writable_mask) -- ignore
+        // raw_value's mem->io[] mirror entirely rather than merging.
+        case 0x04000004: return state->ppu.dispstat;
+        case 0x04000006: return state->ppu.vcount; // VCOUNT: live scanline, read-only on real hardware
+        case 0x04000202: return state->interrupts.if_; // IF: set by gba_interrupts_request, bypasses mem->io[]
+        case 0x04000100: return state->timers.timers[0].counter;
+        case 0x04000104: return state->timers.timers[1].counter;
+        case 0x04000108: return state->timers.timers[2].counter;
+        case 0x0400010C: return state->timers.timers[3].counter;
+        case 0x04000084: { // SOUNDCNT_X: bits 0-3 are live per-channel active status
+            uint16_t status = 0;
+            if (state->apu.square1.enabled) status |= 0x1;
+            if (state->apu.square2.enabled) status |= 0x2;
+            if (state->apu.wave.enabled)    status |= 0x4;
+            if (state->apu.noise.enabled)   status |= 0x8;
+            return (uint16_t)((state->apu.soundcnt_x & 0xFF80) | status);
+        }
+        default:
+            return raw_value;
+    }
+}
+
 static void gba_core_io_write_hook(void* context, uint32_t addr, uint16_t value) {
     GbaCoreState* state = (GbaCoreState*)context;
     switch (addr) {
@@ -101,9 +133,15 @@ case 0x0400003E: { // BG3Y_H
         case 0x04000040: state->ppu.win0h = value; break;
         case 0x04000042: state->ppu.win1h = value; break;
         case 0x04000044: state->ppu.win0v = value; break;
-        case 0x04000046: state->ppu.win1v = value; break;
-        case 0x04000048: state->ppu.winin = value; break;
+case 0x04000048: state->ppu.winin = value; break;
         case 0x0400004A: state->ppu.winout = value; break;
+
+        // ---- Color special effects ----
+        case 0x04000050: state->ppu.bldcnt = value; break;
+        case 0x04000052: state->ppu.bldalpha = value; break;
+        case 0x04000054: state->ppu.bldy = value; break;
+
+        case 0x0400004C: state->ppu.mosaic = value; break;
 
         // ---- DMA0-3: SAD/DAD (32-bit, written as lo/hi halfwords) + CNT ----
         case 0x040000B0: state->dma.channels[0].src_addr = (state->dma.channels[0].src_addr & 0xFFFF0000u) | value; break;
@@ -149,10 +187,12 @@ case 0x0400003E: { // BG3Y_H
         case 0x04000202: gba_interrupts_ack(&state->interrupts, value); break;
         case 0x04000208: state->interrupts.ime = (value & 0x1) != 0; break;
 
-        // ---- APU: PSG channel 1 (square + sweep). Sweep register
-        // (SOUND1CNT_L, 0x04000060) intentionally not wired -- no sweep
-        // fields exist on GbaPsgSquareChannel yet, see gba_apu.cpp's
-        // file-top scope note. ----
+// ---- APU: PSG channel 1 (square + sweep) ----
+        case 0x04000060: // SOUND1CNT_L
+            state->apu.square1.sweep_shift  = value & 0x7;
+            state->apu.square1.sweep_negate = (value >> 3) & 0x1;
+            state->apu.square1.sweep_period = (value >> 4) & 0x7;
+            break;
         case 0x04000062: // SOUND1CNT_H
             state->apu.square1.length_counter    = 64 - (value & 0x3F);
             state->apu.square1.duty              = (value >> 6) & 0x3;
@@ -167,6 +207,10 @@ case 0x0400003E: { // BG3Y_H
                 state->apu.square1.enabled = true;
                 state->apu.square1.duty_pos = 0;
                 state->apu.square1.freq_timer_accum = 0;
+                // Sweep shadow register reloads from the current
+                // frequency on every trigger, and its timer restarts.
+                state->apu.square1.sweep_shadow_freq = state->apu.square1.frequency_reg;
+                state->apu.square1.sweep_accum = 0;
             }
             break;
 
@@ -296,6 +340,8 @@ void gba_core_init(GbaCoreState* state) {
     gba_mem_init(&state->memory, nullptr, nullptr, 0);
     state->memory.io_hook_context = state;
     state->memory.io_write_hook = gba_core_io_write_hook;
+    state->memory.io_read_hook_context = state;
+    state->memory.io_read_hook = gba_core_io_read_hook;
 
     state->bios.data     = nullptr;
     state->bios.size     = 0;

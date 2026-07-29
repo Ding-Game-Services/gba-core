@@ -55,8 +55,20 @@ typedef struct GbaMemory {
     // registers are conventionally halfword-addressable; gba_mem_write32
     // already decomposes into two write16 calls so 32-bit register writes
     // (DMA SAD/DAD, FIFO_A/B) still reach the hook, just as two halves.
-    void* io_hook_context;
+void* io_hook_context;
     void (*io_write_hook)(void* context, uint32_t addr, uint16_t value);
+
+    // ADDED: read-side counterpart to io_write_hook. Several registers
+    // reflect live hardware state that changes without a game write --
+    // VCOUNT, DISPSTAT's status bits, IF (interrupts fire via
+    // gba_interrupts_request, which never touches mem->io[]), live timer
+    // counters, SOUNDCNT_X's per-channel active bits. Without this, reads
+    // of those registers would silently return stale data. Fires from
+    // gba_mem_read16 only, same halfword-granularity convention as the
+    // write hook. Receives the raw mem->io[]-backed value so the hook can
+    // pass through registers it doesn't override.
+    void* io_read_hook_context;
+    uint16_t (*io_read_hook)(void* context, uint32_t addr, uint16_t raw_value);
 } GbaMemory;
 
 void gba_mem_init(GbaMemory* mem, const uint8_t* bios, const uint8_t* rom, uint32_t rom_size);

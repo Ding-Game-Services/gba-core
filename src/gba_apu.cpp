@@ -29,6 +29,7 @@
 #define GBA_CLOCK_HZ 16777216u
 #define GBA_ENVELOPE_PERIOD_CYCLES (GBA_CLOCK_HZ / 64u)   // 64 Hz envelope clock
 #define GBA_LENGTH_PERIOD_CYCLES   (GBA_CLOCK_HZ / 256u)  // 256 Hz length clock
+#define GBA_SWEEP_PERIOD_CYCLES    (GBA_CLOCK_HZ / 128u)  // 128 Hz sweep clock (channel 1 only)
 
 static const uint8_t GBA_DUTY_PATTERNS[4] = {
     0b00000001, // 12.5%
@@ -88,10 +89,40 @@ static void gba_apu_step_square(GbaPsgSquareChannel* ch, uint32_t cycles) {
         ch->output_high = (pattern >> ch->duty_pos) & 1;
     }
 
-    gba_apu_step_envelope(&ch->volume, ch->envelope_step, ch->envelope_increase,
+gba_apu_step_envelope(&ch->volume, ch->envelope_step, ch->envelope_increase,
                            &ch->envelope_accum, cycles);
     gba_apu_step_length(ch->length_enable, &ch->length_counter, &ch->enabled,
                          &ch->length_accum, cycles);
+}
+
+// ADDED: frequency sweep, channel 1 only (see struct-top note in
+// gba_apu.h). Classic GB sweep algorithm: periodically compute a new
+// frequency from the shadow register, disable the channel on overflow
+// past the 11-bit frequency range. NOTE: real hardware also does an
+// immediate overflow-check sweep calculation at trigger time (not just
+// periodically) -- not modeled here, a rare edge case affecting only
+// sweep configs that would overflow on the very first calculation.
+static void gba_apu_step_sweep(GbaPsgSquareChannel* ch, uint32_t cycles) {
+    if (!ch->enabled || ch->sweep_period == 0) return;
+
+    ch->sweep_accum += cycles;
+    uint32_t period = GBA_SWEEP_PERIOD_CYCLES * ch->sweep_period;
+    while (ch->sweep_accum >= period) {
+        ch->sweep_accum -= period;
+        if (ch->sweep_shift == 0) continue; // timer reloads, no frequency change
+
+        uint16_t delta = ch->sweep_shadow_freq >> ch->sweep_shift;
+        int32_t new_freq = ch->sweep_negate
+            ? (int32_t)ch->sweep_shadow_freq - (int32_t)delta
+            : (int32_t)ch->sweep_shadow_freq + (int32_t)delta;
+
+        if (new_freq > 2047 || new_freq < 0) {
+            ch->enabled = false; // overflow disables the channel
+        } else {
+            ch->sweep_shadow_freq = (uint16_t)new_freq;
+            ch->frequency_reg = (uint16_t)new_freq;
+        }
+    }
 }
 
 static void gba_apu_step_wave(GbaPsgWaveChannel* ch, uint32_t cycles) {
@@ -141,6 +172,7 @@ static void gba_apu_step_noise(GbaPsgNoiseChannel* ch, uint32_t cycles) {
 }
 
 void gba_apu_step(GbaApuState* apu, uint32_t cycles) {
+    gba_apu_step_sweep(&apu->square1, cycles);
     gba_apu_step_square(&apu->square1, cycles);
     gba_apu_step_square(&apu->square2, cycles);
     gba_apu_step_wave(&apu->wave, cycles);

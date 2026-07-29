@@ -39,8 +39,10 @@ void gba_mem_init(GbaMemory* mem, const uint8_t* bios, const uint8_t* rom, uint3
 
     mem->bios_open_bus = 0;
 
-    mem->io_hook_context = nullptr;
+mem->io_hook_context = nullptr;
     mem->io_write_hook = nullptr;
+    mem->io_read_hook_context = nullptr;
+    mem->io_read_hook = nullptr;
 }
 
 // Returns a pointer to the backing byte for addr, masked into its region,
@@ -117,7 +119,12 @@ uint16_t gba_mem_read16(GbaMemory* mem, uint32_t addr) {
     addr &= ~1u; // force halfword alignment (real HW rotates on misalign, TODO later)
     uint8_t lo = gba_mem_read8(mem, addr);
     uint8_t hi = gba_mem_read8(mem, addr + 1);
-    return (uint16_t)(lo | (hi << 8));
+    uint16_t raw = (uint16_t)(lo | (hi << 8));
+
+    if (((addr >> 24) == 0x04) && mem->io_read_hook != nullptr) {
+        return mem->io_read_hook(mem->io_read_hook_context, addr, raw);
+    }
+    return raw;
 }
 
 uint32_t gba_mem_read32(GbaMemory* mem, uint32_t addr) {
