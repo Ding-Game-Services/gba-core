@@ -1,3 +1,4 @@
 sdk/
 build/
 build-wasm/
+gba_bios.bin

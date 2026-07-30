@@ -997,11 +997,3 @@ if (obj_enabled) {
     }
     gba_ppu_apply_blending(ppu);
 }
-
-    // mode == 2: both active layers (BG2, BG3) are affine -- TODO entirely.
-    if (obj_enabled) {
-        for (int p = 3; p >= 0; p--) {
-            gba_ppu_draw_sprites_at_priority(ppu, mem, (uint8_t)p);
-        }
-    }
-}

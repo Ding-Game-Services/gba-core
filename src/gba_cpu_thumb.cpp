@@ -638,11 +638,15 @@ cpu->r[rb] = addr;
           } else {
             uint32_t cond = (opcode >> 8) & 0xF;
 
-            if (cond == 0xF) {
-// Format 17: SWI -- ARM's SWI decode is also still a TODO
-                // stub (see gba_cpu_arm.cpp, "remaining decode groups"
-                // comment), so nothing to hook into yet. Wire both up
-                // together when SWI/BIOS call dispatch gets built.
+if (cond == 0xF) {
+                // Format 17: SWI -- mirrors ARM's SWI handling
+                // (gba_cpu_arm.cpp's Software Interrupt group), which
+                // *is* implemented; this Thumb path just never got wired
+                // up to match. comment8 (opcode & 0xFF) isn't decoded
+                // here either, same as the ARM side -- BIOS reads it
+                // from the instruction itself if it needs it.
+                gba_cpu_enter_exception(cpu, GBA_MODE_SUPERVISOR, 0x08);
+                cycles += 2; // SWI: exception entry writes PC, +2S
             } else if (cond == 0xE) {
                 // Undefined instruction space per spec -- not handled.
             } else {

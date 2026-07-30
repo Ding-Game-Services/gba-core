@@ -404,6 +404,8 @@ bool gba_core_reset(GbaCoreState* state) {
     gba_mem_init(&state->memory, state->bios.data, state->memory.rom, state->memory.rom_size);
     state->memory.io_hook_context = state;
     state->memory.io_write_hook = gba_core_io_write_hook;
+    state->memory.io_read_hook_context = state;
+    state->memory.io_read_hook = gba_core_io_read_hook;
 
     // Real hardware boots executing BIOS from 0x00000000 in Supervisor
     // mode, IRQ/FIQ disabled (I and F bits set), ARM state (not Thumb).
@@ -533,6 +535,7 @@ uint32_t hblank_elapsed = 0;
             check_fifo_refill(state, 1, 2); // FIFO B <- DMA2
             hblank_elapsed += cycles;
         }
+    }
 
     // Per-frame render (see gba_ppu.h's top-of-file plan comment: whole
     // screen drawn in one pass from end-of-frame register/VRAM state,

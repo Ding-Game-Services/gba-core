@@ -164,6 +164,35 @@ ShifterResult gba_cpu_decode_operand2_imm(GbaCpuState* cpu, uint32_t opcode) {
     return { result, carry_out };
 }
 
+// Returns true if mode_bits (bottom 5 bits of a would-be CPSR) is one of
+// the 6 legal ARM7TDMI modes GbaCpuMode actually enumerates. Added to
+// close a previously-flagged gap: MSR writes to CPSR's control byte were
+// applying the mode bits unconditionally via gba_cpu_switch_mode, with no
+// check that the value being written is a real mode. An illegal mode
+// value here isn't just wrong-but-harmless -- gba_cpu_bank_for_mode()
+// returns -1 for anything it doesn't recognize, and gba_cpu_switch_mode
+// silently no-ops the r13/r14 (and SPSR) bank save/restore whenever that
+// happens. So one bad MSR write doesn't just corrupt CPSR, it also starts
+// silently discarding subsequent register-banking behavior on every mode
+// switch after that, which is a much harder class of bug to notice or
+// recover from. Rejecting the write here (leaving CPSR's mode field
+// unchanged) matches real hardware's UNPREDICTABLE-but-typically-ignored
+// handling of reserved mode encodings closely enough for our purposes.
+static bool gba_cpu_is_legal_mode(uint32_t mode_bits) {
+    switch (mode_bits) {
+        case GBA_MODE_USER:
+        case GBA_MODE_FIQ:
+        case GBA_MODE_IRQ:
+        case GBA_MODE_SUPERVISOR:
+        case GBA_MODE_ABORT:
+        case GBA_MODE_UNDEFINED:
+        case GBA_MODE_SYSTEM:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Cycle model: coarse S/N-cycle approximation, not wait-state-accurate.
 // Base cost is 1S (register-only instruction). Each additional memory
 // access adds 1N; writing PC (branch/pipeline refill) adds 2S. Good
@@ -242,11 +271,16 @@ uint32_t gba_cpu_step_arm(GbaCpuState* cpu, GbaMemory* mem) {
                     uint32_t new_mode_bits = value & 0x1F;
                     GbaCpuMode new_mode = (GbaCpuMode)new_mode_bits;
 
-                    // TODO: no validation that new_mode_bits is one of the
-                    // 6 legal GbaCpuMode values -- an illegal mode value in
-                    // the written data will misbehave. Add a switch/default
-                    // check here once we hit real-ROM cases that need it.
-                    gba_cpu_switch_mode(cpu, new_mode);
+                    // Reject illegal mode encodings outright -- see
+                    // gba_cpu_is_legal_mode's comment above for why this
+                    // matters beyond just "wrong mode number". CPSR's mode
+                    // field is left unchanged (current_mode/banking are
+                    // untouched) when the value is illegal; I/F/T bits from
+                    // this same write still apply below regardless, since
+                    // those are independent of mode legality.
+                    if (gba_cpu_is_legal_mode(new_mode_bits)) {
+                        gba_cpu_switch_mode(cpu, new_mode);
+                    }
 
 uint32_t itf_mask = mask & 0xE0; // bits 5-7 (T, F, I) within the control byte
                     cpu->cpsr = (cpu->cpsr & ~itf_mask) | (value & itf_mask);

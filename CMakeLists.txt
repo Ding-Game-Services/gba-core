@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # ding-core-sdk lives as a git submodule at sdk/ per project convention --
 # provides ding_types.h, ding_core.h, ding_audio.h/.cpp, ding_savestate.h/.cpp,
 # ding_md5.cpp, and the headless test-harness scaffolding shared across cores.
+# SDK mirrors this repo's own src/+include/ split.
 set(SDK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/sdk)
 
 # ---------------------------------------------------------------------------
@@ -16,36 +17,36 @@ set(SDK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/sdk)
 # entirely below in the per-target sections.
 # ---------------------------------------------------------------------------
 set(GBA_CORE_SOURCES
-    gba_bios.cpp
-    gba_apu.cpp
-    gba_interrupts.cpp
-    gba_timers.cpp
-    gba_cpu.cpp
-    gba_cpu_arm.cpp
-    gba_cpu_thumb.cpp
-    gba_memory.cpp
-    gba_dma.cpp
-    gba_ppu.cpp
-    gba_core.cpp
+    src/gba_bios.cpp
+    src/gba_apu.cpp
+    src/gba_interrupts.cpp
+    src/gba_timers.cpp
+    src/gba_cpu.cpp
+    src/gba_cpu_arm.cpp
+    src/gba_cpu_thumb.cpp
+    src/gba_memory.cpp
+    src/gba_dma.cpp
+    src/gba_ppu.cpp
+    src/gba_core.cpp
 )
 
 set(GBA_CORE_HEADERS
-    gba_bios.h
-    gba_apu.h
-    gba_interrupts.h
-    gba_timers.h
-    gba_cpu.h
-    gba_memory.h
-    gba_dma.h
-    gba_ppu.h
-    gba_core.h
+    include/gba_bios.h
+    include/gba_apu.h
+    include/gba_interrupts.h
+    include/gba_timers.h
+    include/gba_cpu.h
+    include/gba_memory.h
+    include/gba_dma.h
+    include/gba_ppu.h
+    include/gba_core.h
 )
 
 # SDK sources shared with every other Ding core.
 set(SDK_SOURCES
-    ${SDK_DIR}/ding_audio.cpp
-    ${SDK_DIR}/ding_md5.cpp
-    ${SDK_DIR}/ding_savestate.cpp
+    ${SDK_DIR}/src/ding_audio.cpp
+    ${SDK_DIR}/src/ding_md5.cpp
+    ${SDK_DIR}/src/ding_savestate.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -59,10 +60,10 @@ set(SDK_SOURCES
 # filesystem to do here, so it's explicitly disabled below.
 # ---------------------------------------------------------------------------
 if(EMSCRIPTEN)
-    add_executable(gba_core ${GBA_CORE_SOURCES} ${SDK_SOURCES})
+    add_executable(gba_core ${GBA_CORE_SOURCES} ${SDK_SOURCES} src/gba_wasm_bridge.cpp)
     target_include_directories(gba_core PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${SDK_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${SDK_DIR}/include
     )
 
     # Lifecycle + accessor functions the JS harness needs to call directly.
@@ -80,6 +81,25 @@ if(EMSCRIPTEN)
         "_gba_core_save_state"
         "_gba_core_load_state"
         "_gba_core_shutdown"
+        "_gba_wasm_alloc_instance"
+        "_gba_wasm_free_instance"
+        "_gba_wasm_region_base"
+        "_gba_wasm_region_size"
+        "_gba_wasm_region_ptr"
+        "_gba_wasm_region_writable"
+        "_gba_wasm_region_name"
+        "_gba_wasm_set_keys"
+        "_gba_wasm_debug_pc"
+        "_gba_wasm_debug_cpsr"
+        "_gba_wasm_debug_thumb"
+        "_gba_wasm_debug_reg"
+        "_gba_wasm_debug_dispcnt"
+        "_gba_wasm_debug_dispstat"
+        "_gba_wasm_debug_vcount"
+        "_gba_wasm_debug_ime"
+        "_gba_wasm_debug_ie"
+        "_gba_wasm_debug_if"
+        "_gba_wasm_debug_peek32"
         "_malloc"
         "_free"
     )
@@ -108,21 +128,29 @@ if(EMSCRIPTEN)
 # ---------------------------------------------------------------------------
 # Native targets -- Windows desktop, Linux desktop, Steam Deck (SteamOS),
 # ROG Ally (Windows), all x86_64 per project's target-platform list.
-# Builds gba_core as a static lib, plus the CLI test harness.
+# Builds gba_core as a shared library (.dll/.so) -- RetroArch-style core
+# loading, matching the other Ding cores, rather than a static lib linked
+# straight into the frontend.
 #
-# NOTE: gba_harness.cpp is still a TODO skeleton with no real logic and no
-# main() defined -- this target will configure but FAIL TO LINK until that
-# file is actually implemented. Left wired up (rather than commented out)
-# so it starts working the moment the harness gets filled in, but flagging
-# here so the failure isn't a surprise.
+# WINDOWS_EXPORT_ALL_SYMBOLS: MSVC does not auto-export symbols from a DLL
+# the way GCC/Clang do for a .so -- without this the DLL builds but every
+# gba_core_*/gba_wasm_* function is inaccessible to whatever loads it.
+# Exporting at the build-system level means no __declspec(dllexport)/
+# dllimport macros need to be added to the core headers themselves (keeps
+# core files platform-agnostic per the project's Ding Core API principles).
+# Linux builds use CMake's normal default SHARED suffix (.so) -- no
+# override needed there.
+#
+# No CLI test harness here -- the browser HTML page is the real test
+# harness for this core (see project notes). gba_harness.cpp is unused.
 # ---------------------------------------------------------------------------
 else()
-    add_library(gba_core STATIC ${GBA_CORE_SOURCES} ${SDK_SOURCES})
+    add_library(gba_core SHARED ${GBA_CORE_SOURCES} ${SDK_SOURCES})
     target_include_directories(gba_core PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${SDK_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${SDK_DIR}/include
     )
-
-    add_executable(gba_harness gba_harness.cpp)
-    target_link_libraries(gba_harness PRIVATE gba_core)
+    if(WIN32)
+        set_target_properties(gba_core PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    endif()
 endif()
